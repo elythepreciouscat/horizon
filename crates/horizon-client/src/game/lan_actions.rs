@@ -66,6 +66,11 @@ pub(super) struct GuestPlay {
     digging: Option<([i32; 3], [i32; 3])>,
     /// The server tick the digging started (ServerPlayerGameMode.destroyProgressStart).
     dig_start: u64,
+    /// The block that clock is for (ServerPlayerGameMode.destroyPos). A START is the only writer
+    /// that names one (death, a new ServerPlayerGameMode, clears it), so an abort, or a STOP that
+    /// arrives out of reach, leaves it: the STOP of a dig resumed on the same block is still
+    /// measured from the first START's ticks (#4124).
+    destroy_pos: Option<[i32; 3]>,
     /// A block the client stopped digging before the server's time was up: it breaks once
     /// its progress since `dig_start` is complete (ServerPlayerGameMode.hasDelayedDestroy).
     delayed: Option<([i32; 3], u64)>,
@@ -207,6 +212,12 @@ impl GuestPlay {
     /// The item in use: its slot and for how many ticks.
     pub(super) fn using(&self) -> Option<(usize, u32)> {
         self.using
+    }
+    /// The `ServerPlayerGameMode.destroyProgressStart` a STOP on `pos` is measured from: the clock
+    /// belongs to the block the START named (`destroyPos`), and only a START writes either, so a
+    /// dig resumed after a fall still runs on the first START's ticks (#4124).
+    fn dig_start_for(&self, pos: [i32; 3]) -> Option<u64> {
+        (self.destroy_pos == Some(pos)).then_some(self.dig_start)
     }
 }
 
@@ -1204,6 +1215,7 @@ impl Game<'_> {
                     let play = host.play.entry(conn).or_default();
                     play.digging = Some((a.pos, face));
                     play.dig_start = host.hub.ticks;
+                    play.destroy_pos = Some(a.pos);
                     play.last_progress = -1;
                     // The pause between two blocks is the client's (MultiPlayerGameMode's
                     // destroyDelay); the server digs from the START it receives.
@@ -1240,9 +1252,10 @@ impl Game<'_> {
                 3 => {
                     host.hub.ack(conn, a.sequence);
                     if !host.hub.guests[gi].may_reach_block(a.pos) {
-                        // Too far (handleBlockBreakAction's "too far"): the
-                        // dig drops and the ack has the client undo its
-                        // prediction.
+                        // Too far (handleBlockBreakAction's "too far"): the ack has the client
+                        // undo its prediction, and only the dig drops — `destroy_pos` and the
+                        // ticks since its START stay, so a STOP for the same block after the
+                        // guest comes back into reach counts them (#4124).
                         let play = host.play.entry(conn).or_default();
                         play.digging = None;
                         play.mining = None;
@@ -1252,6 +1265,8 @@ impl Game<'_> {
                 }
                 2 => {
                     host.hub.ack(conn, a.sequence);
+                    // ServerPlayerGameMode.abortDestroyBlock clears the dig and the crack; the
+                    // clock `destroy_pos` names is left to the next START (#4124).
                     let play = host.play.entry(conn).or_default();
                     play.digging = None;
                     play.mining = None;
@@ -3393,19 +3408,18 @@ impl Game<'_> {
 
     /// ServerPlayerGameMode.handleBlockBreakAction, STOP_DESTROY_BLOCK: the client finished
     /// digging `pos` (and predicted the break). The server breaks it if its own count of the
-    /// digging since START is at least 70 % done; otherwise it keeps digging alone and breaks
-    /// it when done (`guest_delayed_destroy`), so the client's broken block is never left
-    /// standing on the server.
+    /// digging since the START that named `pos` is at least 70 % done; otherwise it keeps digging
+    /// alone and breaks it when done (`guest_delayed_destroy`), so the client's broken block is
+    /// never left standing on the server.
     fn guest_stop_digging(&mut self, host: &mut LanHost, conn: u32, pos: [i32; 3]) {
         let ticks = host.hub.ticks;
         let play = host.play.entry(conn).or_default();
-        let dug = play.digging.take().is_some_and(|(p, _)| p == pos);
+        play.digging = None;
         play.mining = None;
-        let start = play.dig_start;
-        let state = self.world.block(pos[0], pos[1], pos[2]);
-        if !dug {
+        let Some(start) = play.dig_start_for(pos) else {
             return;
-        }
+        };
+        let state = self.world.block(pos[0], pos[1], pos[2]);
         if self.res.facts().is_air(state) {
             // Already broken (the guest's own tick dug it out): only the crack goes.
             self.guest_crack_gone(host, conn, pos);
@@ -3516,6 +3530,8 @@ impl Game<'_> {
         let cracked = play.digging.take().filter(|_| play.last_progress >= 0);
         play.mining = None;
         play.delayed = None;
+        // Respawning gives it a new ServerPlayerGameMode: the clock goes with the body.
+        play.destroy_pos = None;
         play.destroy_delay = 0;
         play.using = None;
         play.last_progress = -1;
@@ -4005,6 +4021,27 @@ fn eye_columns(at: [f64; 3], body: Dimensions) -> [std::ops::RangeInclusive<i32>
 mod tests {
     use super::eye_columns;
     use horizon_client::pose::Pose;
+
+    /// #4124: a STOP is measured from the START that named its block (`destroyPos`), not from a
+    /// dig still running. A guest reaches a block only at a jump's apex: every landing aborts the
+    /// dig (`digging` is gone) but leaves the clock, so the STOP on a later jump still counts the
+    /// ticks since the first START, as vanilla's too-far path leaves `destroyProgressStart` alone.
+    #[test]
+    fn a_stop_after_a_fall_still_uses_the_starts_clock() {
+        use super::GuestPlay;
+        let pos = [12, 70, -5];
+        // The landing cleared the dig (`digging`), not the clock the START set.
+        let mut play = GuestPlay {
+            destroy_pos: Some(pos),
+            dig_start: 1000,
+            ..GuestPlay::default()
+        };
+        assert_eq!(play.dig_start_for(pos), Some(1000));
+        // Another block never inherits it, and neither does the new body a respawn gives.
+        assert_eq!(play.dig_start_for([12, 71, -5]), None);
+        play.destroy_pos = None;
+        assert_eq!(play.dig_start_for(pos), None);
+    }
 
     /// #3684: a player shrunk to `minecraft:scale` 0.1 who stands 0.05 from a
     /// wall has eyes 0.048 wide, which don't reach into it: they don't

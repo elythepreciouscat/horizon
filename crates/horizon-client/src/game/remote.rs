@@ -393,9 +393,15 @@ pub(super) struct Remote {
     profile: u128,
     /// The local player's profile name: its score holder and team member.
     pub(super) profile_name: String,
+    /// `MultiPlayerGameMode.destroyBlockPos`, `.destroyProgress` and the face last sent: the block
+    /// the break targets, which outlives the break itself.
     destroying: Option<([i32; 3], u8, f32)>,
     /// `MultiPlayerGameMode.destroyingItem`: the held item key the break began with.
     destroying_item: String,
+    /// `MultiPlayerGameMode.isDestroying`: a break is running. `destroying` keeps the target after
+    /// one ends (`destroyBlockPos` is written only when a break starts), so a dig resumed on the
+    /// same block and item sends no new START and the server keeps its clock (#4124).
+    is_destroying: bool,
     destroy_delay: u32,
     input: horizon_client::interaction_input::InteractionInput,
     /// Keys whose presses send a packet (swap hands, drop, a mount's
@@ -752,6 +758,7 @@ impl Game<'_> {
             profile_name: String::new(),
             destroying: None,
             destroying_item: String::new(),
+            is_destroying: false,
             destroy_delay: 0,
             input: Default::default(),
             pending_keys: Vec::new(),
@@ -4686,6 +4693,7 @@ impl Game<'_> {
             // handleMovePlayer does not change LocalPlayer.sendPosition's
             // baseline: the next tick must still report the corrected state.
             r.destroying = None;
+            r.is_destroying = false;
         }
         self.mining = None;
         self.send(S::AcceptTeleportation(play::AcceptTeleportation {
@@ -5824,10 +5832,19 @@ impl Game<'_> {
         }
     }
 
-    /// `MultiPlayerGameMode.stopDestroyBlock`: aborts the break and starts
-    /// the attack strength again.
+    /// `MultiPlayerGameMode.stopDestroyBlock`: aborts the break and starts the attack strength
+    /// again. Only the progress goes: `destroyBlockPos` and `destroyingItem` keep the target, so
+    /// a dig resumed on the same block sends no START and the server's clock runs on (#4124).
     pub(super) fn stop_remote_mining(&mut self) {
-        if let Some((pos, _, _)) = self.remote.as_mut().and_then(|r| r.destroying.take()) {
+        let kept = self.remote.as_mut().and_then(|r| {
+            if !std::mem::take(&mut r.is_destroying) {
+                return None;
+            }
+            let (pos, face, _) = r.destroying?;
+            r.destroying = Some((pos, face, 0.0));
+            r.destroying
+        });
+        if let Some((pos, _, _)) = kept {
             let state = self.world.block(pos[0], pos[1], pos[2]);
             self.tutorial_destroy(state, -1.0);
             self.send(S::PlayerAction(play::PlayerAction {
@@ -5904,14 +5921,25 @@ impl Game<'_> {
         };
         // sameDestroyTarget: the same block and still the item the break began with.
         let held = self.main_hand_key();
-        let same = self.remote.as_ref().is_some_and(|r| {
+        let same_target = self.remote.as_ref().is_some_and(|r| {
             r.destroying.is_some_and(|(p, _, _)| p == hit.pos) && r.destroying_item == held
         });
+        // startDestroyBlock leaves only a break that is still running alone: once one has stopped,
+        // the same target takes a fresh START so the server re-anchors its clock (isDestroying).
+        let same = self.remote.as_ref().is_some_and(|r| r.is_destroying) && same_target;
         if start && same {
             return;
         }
         if !same {
-            if let Some((old, _, _)) = self.remote.as_mut().and_then(|r| r.destroying.take()) {
+            // startDestroyBlock aborts only a break that is running; a target left by a stop that
+            // ended one is just replaced by the START below.
+            let aborted = self.remote.as_mut().and_then(|r| {
+                if !std::mem::take(&mut r.is_destroying) {
+                    return None;
+                }
+                r.destroying.take()
+            });
+            if let Some((old, _, _)) = aborted {
                 let old_state = self.world.block(old[0], old[1], old[2]);
                 self.tutorial_destroy(old_state, -1.0);
                 self.send(S::PlayerAction(play::PlayerAction {
@@ -5942,6 +5970,7 @@ impl Game<'_> {
             if let Some(r) = self.remote.as_mut() {
                 r.destroying = Some((hit.pos, face, 0.0));
                 r.destroying_item = held;
+                r.is_destroying = true;
             }
             // startDestroyBlock plays the first hit and crack itself; the
             // server's level events 2019 and 2020 do the rest.
@@ -5974,6 +6003,7 @@ impl Game<'_> {
             }));
             if let Some(r) = self.remote.as_mut() {
                 r.destroying = None;
+                r.is_destroying = false;
                 r.destroy_delay = 5;
             }
             self.mining = None;
@@ -6049,7 +6079,7 @@ impl Game<'_> {
     fn remote_use(&mut self) {
         // Minecraft.startUseItem returns before resetting rightClickDelay
         // while a survival block break is active.
-        if self.remote.as_ref().is_some_and(|r| r.destroying.is_some()) {
+        if self.remote.as_ref().is_some_and(|r| r.is_destroying) {
             return;
         }
         self.use_delay = 4;
@@ -7267,6 +7297,7 @@ impl Game<'_> {
             } else {
                 if let Some(r) = self.remote.as_mut() {
                     r.destroying = None;
+                    r.is_destroying = false;
                 }
                 self.mining = None;
             }

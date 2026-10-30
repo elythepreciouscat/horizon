@@ -5833,9 +5833,10 @@ impl Game<'_> {
     }
 
     /// `MultiPlayerGameMode.stopDestroyBlock`: aborts the break and starts the attack strength
-    /// again. Only the progress goes: `destroyBlockPos` and `destroyingItem` keep the target, so
-    /// a dig resumed on the same block sends no START and the server's clock runs on (#4124).
-    pub(super) fn stop_remote_mining(&mut self) {
+    /// again, if one is running (`if (!isDestroying) return;`), and says whether it did. Only the
+    /// progress goes: `destroyBlockPos` and `destroyingItem` keep the target, so a dig resumed on
+    /// the same block sends no START and the server's clock runs on (#4124).
+    pub(super) fn stop_remote_mining(&mut self) -> bool {
         let kept = self.remote.as_mut().and_then(|r| {
             if !std::mem::take(&mut r.is_destroying) {
                 return None;
@@ -5844,17 +5845,19 @@ impl Game<'_> {
             r.destroying = Some((pos, face, 0.0));
             r.destroying
         });
-        if let Some((pos, _, _)) = kept {
-            let state = self.world.block(pos[0], pos[1], pos[2]);
-            self.tutorial_destroy(state, -1.0);
-            self.send(S::PlayerAction(play::PlayerAction {
-                action: 2,
-                pos,
-                direction: 0,
-                sequence: 0,
-            }));
-            self.reset_attack_strength();
-        }
+        let Some((pos, _, _)) = kept else {
+            return false;
+        };
+        let state = self.world.block(pos[0], pos[1], pos[2]);
+        self.tutorial_destroy(state, -1.0);
+        self.send(S::PlayerAction(play::PlayerAction {
+            action: 2,
+            pos,
+            direction: 0,
+            sequence: 0,
+        }));
+        self.reset_attack_strength();
+        true
     }
 
     /// MultiPlayerGameMode.startDestroyBlock / continueDestroyBlock.
@@ -7304,8 +7307,12 @@ impl Game<'_> {
                 self.mining = None;
             }
         } else {
-            self.stop_remote_mining();
-            self.mining = None;
+            // `stopDestroyBlock` returns at once for a break that is not running: a pick that
+            // missed once a break stopped ends nothing, so the dig's accumulated progress stays
+            // and goes on growing on the jumps that follow (#4124).
+            if self.stop_remote_mining() {
+                self.mining = None;
+            }
         }
     }
     /// Keys with a multiplayer meaning; returns true when consumed.

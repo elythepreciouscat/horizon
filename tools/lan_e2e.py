@@ -9409,15 +9409,16 @@ CHECK_FNS['dig_sounds'] = check_dig_sounds
 def check_dig_clock(host, guest, out):
     """#4124: attack held on a block only the top of a jump can reach keeps one dig clock.
 
-    Stone by hand is 150 ticks of digging (Player.getDestroySpeed: no correct tool, so speed 1 over
-    hardness 1.5 and 100). The stone hangs seven blocks above the guest's feet, so the standing
-    eye, 1.62 up, is 5.38 from the block's lowest face, past the 4.5 pick, while at the apex the
-    eye is 2.87 up and 4.13 away, inside it: the client digs the stone for the few ticks around
-    each apex only, and loses it on the way down. The server keeps the clock of the START that
-    named the block (ServerPlayerGameMode.destroyPos) across those falls, so the dig resumed on it
-    is measured from that first START and the stone breaks about one dig in (#4124), where before
-    the fix every landing re-sent START and re-anchored the clock. The face met is the underside:
-    the eye is below the block at the apex too, so a top face is never the one hit.
+    A diamond pickaxe on stone is 30 ticks of digging (Player.getDestroySpeed: correct tool,
+    speed 8 over hardness 1.5 and 30), five times slower airborne. The stone hangs seven blocks
+    above the guest's feet, so the standing eye, 1.62 up, is 5.38 from the block's lowest face,
+    past the 4.5 pick, while at the apex the eye is 2.87 up and 4.13 away, inside it: the client
+    digs the stone for the few ticks around each apex only, and its pick misses on the way down.
+    Vanilla's stopDestroyBlock returns at once for a break that is not running, so after the first
+    fall it is a no-op: the client's progress and dig identity survive, no START is re-sent, and
+    the server keeps the clock of the first START (ServerPlayerGameMode.destroyPos). The STOP that
+    arrives when the accumulated progress passes 1.0 is therefore measured from that first START.
+    The face met is the underside: the eye is below the block at the apex too.
     """
     x, y, z = (int(v // 1) for v in pos_of(guest))
     cell = (x, y + 7, z)
@@ -9429,6 +9430,7 @@ def check_dig_clock(host, guest, out):
     try:
         guest('command', command='gamemode survival')
         guest('command', command='clear @s')
+        guest('command', command='item replace entity @s weapon.mainhand with minecraft:diamond_pickaxe')
         host('command', command=f'fill {x - 2} {y - 1} {z - 2} {x + 2} {y + 8} {z + 2} minecraft:air')
         host('command', command=f'fill {x - 2} {y - 1} {z - 2} {x + 2} {y - 1} {z + 2} minecraft:stone')
         host('command', command=f'setblock {cell[0]} {cell[1]} {cell[2]} minecraft:stone')
@@ -9470,7 +9472,9 @@ def check_dig_clock(host, guest, out):
         assert nearest is not None and nearest < 4.5, f'the guest never had the stone at an apex: {seen}'
         assert broke and seen['guest_view'] == 'minecraft:air', \
             f'attack held through 15 s of jumps did not break the stone: {seen}'
-        assert stretch < 20, f'one dig ran {stretch} ticks in reach: the stone is not the apex one: {seen}'
+        # One in-reach stretch is about five ticks; more than that survived a fall, which is the
+        # accumulation vanilla's stopDestroyBlock leaves behind and the fix restores.
+        assert stretch > 8, f'the dig restarted on every jump ({stretch} ticks): {seen}'
         return seen
     finally:
         guest.raw('release')

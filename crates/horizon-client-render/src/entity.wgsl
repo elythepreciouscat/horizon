@@ -171,9 +171,14 @@ const PORTAL_COLORS = array<vec3<f32>, 16>(
     vec3(0.080955, 0.314821, 0.661491),
 );
 // textureProj on a repeating texture that lives in the atlas at `rect`.
+// Vanilla samples standalone textures with GL_REPEAT; inset keeps bilinear
+// samples inside the atlas sprite so wrap edges do not bleed neighbours.
 fn portal_sample(rect: vec4<f32>, p: vec4<f32>) -> vec3<f32> {
     let st = fract(p.xy / p.w);
-    return textureSampleLevel(atlas, atlas_sampler, rect.xy + st * rect.zw, 0.0).rgb;
+    let sprite_px = max(rect.zw * vec2<f32>(textureDimensions(atlas)), vec2(1.0));
+    let inset = 0.5 / sprite_px;
+    let uv = clamp(st, inset, 1.0 - inset);
+    return textureSampleLevel(atlas, atlas_sampler, rect.xy + uv * rect.zw, 0.0).rgb;
 }
 // texProj0 * end_portal_layer(layer): the row vector through mat4(scale * rotate),
 // translate and SCALE_TRANSLATE in turn.

@@ -311,7 +311,7 @@ enum Kind {
         pose: &'static str,
         facing: &'static str,
     },
-    /// `TheEndPortalRenderer`: the top and bottom faces of a 6/16-tall slab.
+    /// `TheEndPortalRenderer`: the top face of a 6/16-tall slab.
     EndPortal,
     /// `TheEndGatewayRenderer`: the visible faces of the cube and the beam.
     EndGateway {
@@ -1610,12 +1610,14 @@ impl BlockEntityRenderer {
                 }
             }
             Kind::EndPortal => {
-                // TheEndPortalRenderer.TRANSFORMATION: y from 6/16 to 12/16; only the
-                // vertical faces (TheEndPortalBlockEntity.shouldRenderFace).
+                // TheEndPortalRenderer.TRANSFORMATION: y from 6/16 to 12/16.
+                // Vanilla's shouldRenderFace is Axis.Y (Up+Down); drawing Down as
+                // well z-fights through the Up face under wgpu reverse-Z and puts
+                // black holes in the starfield (#4237). The top face is what players see.
                 let m = base
                     * Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
                     * Mat4::from_scale(Vec3::new(1.0, 0.375, 1.0));
-                portal_cube(m, &[Direction::Down, Direction::Up], END_PORTAL_LAYER, out);
+                portal_cube(m, &[Direction::Up], END_PORTAL_LAYER, out);
             }
             Kind::EndGateway { state } => {
                 let anim = (scene.anim)(pos);
@@ -1987,6 +1989,20 @@ fn portal_cube(m: Mat4, faces: &[Direction], layer: u32, out: &mut Vec<Vertex>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn end_portal_cube_only_submits_the_up_face() {
+        // Vanilla shouldRenderFace is Axis.Y; Horizon submits only Up so the Down
+        // face cannot z-fight holes through the starfield under reverse-Z (#4237).
+        let m = Mat4::from_translation(Vec3::new(0.0, 0.375, 0.0))
+            * Mat4::from_scale(Vec3::new(1.0, 0.375, 1.0));
+        let mut out = Vec::new();
+        portal_cube(m, &[Direction::Up], END_PORTAL_LAYER, &mut out);
+        assert_eq!(out.len(), 4);
+        for v in &out {
+            assert!((v.pos[1] - 0.75).abs() < 1e-5, "expected top face y=0.75, got {}", v.pos[1]);
+            assert_eq!(v.layer, END_PORTAL_LAYER);
+        }
+    }
     #[test]
     #[ignore = "requires prepared models/textures in HORIZON_TEST_RESOURCES"]
     fn entity_block_particles_and_breaking_use_exported_models() -> crate::Result<()> {

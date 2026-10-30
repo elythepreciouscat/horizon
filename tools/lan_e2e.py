@@ -296,6 +296,10 @@ address. The script then checks, from both sides, what a guest's game used to ge
              the server forgets the completed instant break (#1880).
 - dig_stop:  a block the client breaks at once (a creative break, a dead bush) leaves the
              server no dig to keep: the block put back stays and no mining sound plays on (#1340, #1908).
+- dig_clock: a guest in survival holds attack on a stone seven blocks above its feet: the standing
+             eye is 5.38 from its underside and only near a jump's apex (4.13) inside the 4.5 pick,
+             and the dig resumed after each fall is measured from the START that named the block, so
+             it breaks about one dig in rather than one dig per landing (#4124).
 
 Each check is reported on its own (a failing one doesn't stop the others) and the screenshots of
 both sides go to --out (host-*.png, guest-*.png).
@@ -9400,6 +9404,82 @@ def check_dig_sounds(host, guest, out):
 
 CHECKS += ['dig_sounds']
 CHECK_FNS['dig_sounds'] = check_dig_sounds
+
+
+def check_dig_clock(host, guest, out):
+    """#4124: attack held on a block only the top of a jump can reach keeps one dig clock.
+
+    Stone by hand is 150 ticks of digging (Player.getDestroySpeed: no correct tool, so speed 1 over
+    hardness 1.5 and 100). The stone hangs seven blocks above the guest's feet, so the standing
+    eye, 1.62 up, is 5.38 from the block's lowest face, past the 4.5 pick, while at the apex the
+    eye is 2.87 up and 4.13 away, inside it: the client digs the stone for the few ticks around
+    each apex only, and loses it on the way down. The server keeps the clock of the START that
+    named the block (ServerPlayerGameMode.destroyPos) across those falls, so the dig resumed on it
+    is measured from that first START and the stone breaks about one dig in (#4124), where before
+    the fix every landing re-sent START and re-anchored the clock. The face met is the underside:
+    the eye is below the block at the apex too, so a top face is never the one hit.
+    """
+    x, y, z = (int(v // 1) for v in pos_of(guest))
+    cell = (x, y + 7, z)
+    # The eye's distance to the stone's lowest face: past the 4.5 pick standing, inside it at apex.
+    gap = lambda lift: round(cell[1] - (y + 1.62 + lift), 2)
+    seen = {'cell': list(cell), 'gap': {'standing': gap(0.0), 'apex': gap(1.2522)}}
+    assert gap(0.0) > 4.5 > gap(1.2522), f'the stone is not out of reach standing and in it at the apex: {seen}'
+    mode = guest('state').get('gamemode', 'survival')
+    try:
+        guest('command', command='gamemode survival')
+        guest('command', command='clear @s')
+        host('command', command=f'fill {x - 2} {y - 1} {z - 2} {x + 2} {y + 8} {z + 2} minecraft:air')
+        host('command', command=f'fill {x - 2} {y - 1} {z - 2} {x + 2} {y - 1} {z + 2} minecraft:stone')
+        host('command', command=f'setblock {cell[0]} {cell[1]} {cell[2]} minecraft:stone')
+        # Straight up: the ray meets the stone's lowest face at every eye height.
+        guest('command', command=f'tp @s {x + 0.5} {y} {z + 0.5} 0 -90')
+        guest.wait(20)
+        standing = guest('state')
+        if 'looking_at' not in standing or standing.get('player') is None:
+            return 'skipped (the ctl state has no crosshair target or eyes)'
+        seen['standing'] = {'aim': standing['looking_at']['kind'],
+                            'eye': [round(v, 2) for v in standing['player']['eye']],
+                            'pitch': round(standing['player']['pitch'], 1)}
+        assert standing['looking_at']['kind'] != 'block' \
+            or standing['looking_at']['block']['pos'] != list(cell), f'the stone is in reach standing: {seen}'
+        assert host.raw('block', *cell).get('block') == 'minecraft:stone', f'the stone did not stay: {seen}'
+        # Hold attack and keep jumping: each fall stops the client's dig (its progress is zeroed)
+        # and airborne digs five times slower, so only the server's clock can finish the stone.
+        before = standing['ticks']
+        nearest, stretch, polls, broke = None, 0, 0, False
+        guest.raw('mouse', 'left', 'down')
+        guest.raw('key', 'space', 'down')
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            polls += 1
+            now = guest('state')
+            target = now['looking_at'].get('block')
+            if target and target['pos'] == list(cell):
+                nearest = target['distance'] if nearest is None else min(nearest, target['distance'])
+            if (now.get('mining') or {}).get('pos') == list(cell):
+                stretch = max(stretch, now['mining']['ticks'])
+            if polls % 3 == 0 and host.raw('block', *cell).get('block') == 'minecraft:air':
+                broke = True
+                break
+        guest.wait(2)
+        seen.update(ticks=guest('state')['ticks'] - before, polls=polls,
+                    nearest=None if nearest is None else round(nearest, 2), longest_dig=stretch,
+                    guest_view=guest.raw('block', *cell).get('block'))
+        guest.shot(out, 'dig_clock')
+        assert nearest is not None and nearest < 4.5, f'the guest never had the stone at an apex: {seen}'
+        assert broke and seen['guest_view'] == 'minecraft:air', \
+            f'attack held through 15 s of jumps did not break the stone: {seen}'
+        assert stretch < 20, f'one dig ran {stretch} ticks in reach: the stone is not the apex one: {seen}'
+        return seen
+    finally:
+        guest.raw('release')
+        host('command', command=f'setblock {cell[0]} {cell[1]} {cell[2]} minecraft:air')
+        guest('command', command=f'gamemode {mode}')
+
+
+CHECKS += ['dig_clock']
+CHECK_FNS['dig_clock'] = check_dig_clock
 
 
 def check_popped_break_effects(host, guest, out):

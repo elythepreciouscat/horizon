@@ -5921,16 +5921,18 @@ impl Game<'_> {
         };
         // sameDestroyTarget: the same block and still the item the break began with.
         let held = self.main_hand_key();
-        let same_target = self.remote.as_ref().is_some_and(|r| {
+        let same = self.remote.as_ref().is_some_and(|r| {
             r.destroying.is_some_and(|(p, _, _)| p == hit.pos) && r.destroying_item == held
         });
-        // startDestroyBlock leaves only a break that is still running alone: once one has stopped,
-        // the same target takes a fresh START so the server re-anchors its clock (isDestroying).
-        let same = self.remote.as_ref().is_some_and(|r| r.is_destroying) && same_target;
-        if start && same {
+        // startDestroyBlock leaves only a break that is still running alone (`isDestroying &&
+        // sameDestroyTarget`); a click on the block a stopped break still names starts it again,
+        // so the server re-anchors its clock. A held button carries the same target on, and that
+        // one keeps the clock (#4124).
+        let running = self.remote.as_ref().is_some_and(|r| r.is_destroying);
+        if start && same && running {
             return;
         }
-        if !same {
+        if !same || start {
             // startDestroyBlock aborts only a break that is running; a target left by a stop that
             // ended one is just replaced by the START below.
             let aborted = self.remote.as_mut().and_then(|r| {

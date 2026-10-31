@@ -294,45 +294,19 @@ impl SectionCoder {
 /// Sections kept before the ones no longer resident are dropped.
 const CACHE_SWEEP: usize = 1 << 15;
 
-/// Columns below which the bodies are assembled on the tick's thread alone.
-const PARALLEL_BODIES_MIN: usize = 4;
-
-/// The body of each column, in the order given. A batch of new columns costs
-/// one copy of its sections and light layers each; with enough of them the
-/// copies run on the helper threads, one group each, while this thread takes
-/// the last group. Every body only reads the encoder and the level.
+/// The bodies of the columns, in the order given. `ChunkEncoder::warm` has
+/// already prepared uncached sections on its persistent pool; assembling the
+/// final packet here is small and must not create a scoped helper group that
+/// makes the tick wait for threads competing with world generation.
 pub fn bodies(
     encoder: &ChunkEncoder,
     columns: &[&Chunk],
     world: &crate::world::World,
 ) -> Vec<Vec<u8>> {
-    let workers = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .saturating_sub(1)
-        .clamp(1, columns.len().max(1));
-    if workers == 1 || columns.len() < PARALLEL_BODIES_MIN {
-        return columns
-            .iter()
-            .map(|column| encoder.body_in(column, world))
-            .collect();
-    }
-    let per = columns.len().div_ceil(workers);
-    let mut bodies: Vec<Vec<u8>> = vec![Vec::new(); columns.len()];
-    std::thread::scope(|scope| {
-        let mut groups: Vec<_> = columns.chunks(per).zip(bodies.chunks_mut(per)).collect();
-        let last = groups.pop().expect("columns is not empty");
-        for (group, out) in groups {
-            scope.spawn(move || {
-                for (column, body) in group.iter().zip(out) {
-                    *body = encoder.body_in(column, world);
-                }
-            });
-        }
-        for (column, body) in last.0.iter().zip(last.1) {
-            *body = encoder.body_in(column, world);
-        }
-    });
-    bodies
+    columns
+        .iter()
+        .map(|column| encoder.body_in(column, world))
+        .collect()
 }
 
 /// Uncached sections below which a batch is encoded on the tick's thread

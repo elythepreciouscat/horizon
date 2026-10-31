@@ -2595,6 +2595,10 @@ impl Game<'_> {
         // GameRenderer.pick: the block ray runs out to the larger of the two
         // interaction ranges.
         self.clip_ray(origin, dir, self.block_reach.max(self.entity_reach))
+            .filter(|hit| {
+                let distance: [f64; 3] = std::array::from_fn(|i| hit.point[i] - origin[i]);
+                distance.iter().map(|v| v * v).sum::<f64>() <= self.block_reach.powi(2)
+            })
     }
     /// The first block outline hit within `reach` along the unit `dir`.
     fn clip_ray(&self, origin: [f64; 3], dir: [f64; 3], reach: f64) -> Option<Hit> {

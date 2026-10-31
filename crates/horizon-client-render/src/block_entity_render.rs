@@ -1999,7 +1999,11 @@ mod tests {
         portal_cube(m, &[Direction::Up], END_PORTAL_LAYER, &mut out);
         assert_eq!(out.len(), 4);
         for v in &out {
-            assert!((v.pos[1] - 0.75).abs() < 1e-5, "expected top face y=0.75, got {}", v.pos[1]);
+            assert!(
+                (v.pos[1] - 0.75).abs() < 1e-5,
+                "expected top face y=0.75, got {}",
+                v.pos[1]
+            );
             assert_eq!(v.layer, END_PORTAL_LAYER);
         }
     }

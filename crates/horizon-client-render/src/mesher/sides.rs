@@ -101,6 +101,29 @@ impl Sides {
             draw(first, start - first);
         }
     }
+
+    /// Orders the quads in each side bucket from the outside toward the
+    /// section interior. Equal planes keep their original order so coplanar
+    /// model overlays retain the mesher's result.
+    pub(crate) fn sort_front_to_back(&self, order: &mut [u32], solid: &[[TerrainVertex; 4]]) {
+        let mut start = 0;
+        for (i, bucket) in BUCKETS.iter().enumerate() {
+            let end = self.ends[i] as usize;
+            let slice = &mut order[start..end];
+            if let Bucket::Side(axis, positive) = *bucket {
+                slice.sort_by(|&a, &b| {
+                    let a = solid[a as usize][0].pos[axis];
+                    let b = solid[b as usize][0].pos[axis];
+                    if positive {
+                        b.total_cmp(&a)
+                    } else {
+                        a.total_cmp(&b)
+                    }
+                });
+            }
+            start = end;
+        }
+    }
 }
 
 /// The bucket of a quad: the axis plane it lies in and the side its
@@ -342,5 +365,39 @@ mod tests {
             solid.iter().map(|v| v.layer).collect::<Vec<_>>(),
             before.iter().map(|v| v.layer).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn front_to_back_sort_orders_positive_faces_and_keeps_ties_stable() {
+        let mut solid: Vec<_> = [(1.0, 10), (3.0, 30), (3.0, 31)]
+            .into_iter()
+            .flat_map(|(x, layer)| {
+                quad(
+                    [[x, 0.0, 0.0], [x, 1.0, 0.0], [x, 1.0, 1.0], [x, 0.0, 1.0]],
+                    layer,
+                )
+            })
+            .collect();
+        let sides = sort(&mut solid);
+        let mut order: Vec<u32> = (0..3).collect();
+        sides.sort_front_to_back(&mut order, solid.as_chunks::<4>().0);
+        assert_eq!(order, [1, 2, 0]);
+    }
+
+    #[test]
+    fn front_to_back_sort_orders_negative_faces_toward_the_eye() {
+        let mut solid: Vec<_> = [(3.0, 30), (1.0, 10), (2.0, 20)]
+            .into_iter()
+            .flat_map(|(x, layer)| {
+                quad(
+                    [[x, 0.0, 0.0], [x, 0.0, 1.0], [x, 1.0, 1.0], [x, 1.0, 0.0]],
+                    layer,
+                )
+            })
+            .collect();
+        let sides = sort(&mut solid);
+        let mut order: Vec<u32> = (0..3).collect();
+        sides.sort_front_to_back(&mut order, solid.as_chunks::<4>().0);
+        assert_eq!(order, [1, 2, 0]);
     }
 }

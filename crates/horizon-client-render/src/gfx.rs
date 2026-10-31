@@ -6,7 +6,7 @@ use crate::{
     environment::Sky,
     graphics::GraphicsApi,
     hud::{HudBatch, HudRenderer},
-    mesher::{SectionMesh, Sides, TerrainVertex, Vertex},
+    mesher::{OPAQUE_LAYER, SectionMesh, Sides, TerrainVertex, Vertex},
     section_mask::SectionMask,
     sprites::SpriteAnimation,
 };
@@ -251,6 +251,7 @@ struct SectionGpu {
     /// stays behind it (`Renderer::leave_section`); released once it has.
     leaving: Option<std::time::Instant>,
 }
+
 impl SectionGpu {
     /// Its fade code this frame (`lod::fade_code`), 0 once whole. `retiring`:
     /// its column has left the render distance, far terrain is coming in
@@ -3306,6 +3307,24 @@ impl Renderer {
             self.indices = Self::quad_indices(&self.device, self.index_quads);
         }
         let vertices = (mesh.solid.len() + mesh.translucent.len()) as u64;
+        let solid_quads = mesh.solid.as_chunks::<4>().0;
+        let sides = if mesh.sides.quads() == solid {
+            mesh.sides
+        } else {
+            Sides::unsorted(solid)
+        };
+        let has_cutout = solid_quads.iter().any(|q| q[0].layer & OPAQUE_LAYER == 0);
+        let reordered_solid = if has_cutout {
+            let mut order: Vec<u32> = (0..solid).collect();
+            sides.sort_front_to_back(&mut order, solid_quads);
+            let mut reordered = Vec::with_capacity(mesh.solid.len());
+            for quad in order {
+                reordered.extend_from_slice(&solid_quads[quad as usize]);
+            }
+            Some(reordered)
+        } else {
+            None
+        };
         let encoder = self.section_copies.get_or_insert_with(|| {
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3337,7 +3356,11 @@ impl Renderer {
             )
         });
         let stride = std::mem::size_of::<TerrainVertex>() as u64;
-        for (offset, part) in [(0, &mesh.solid), (mesh.solid.len(), &mesh.translucent)] {
+        let solid_vertices = reordered_solid.as_deref().unwrap_or(&mesh.solid);
+        for (offset, part) in [
+            (0, solid_vertices),
+            (mesh.solid.len(), &mesh.translucent[..]),
+        ] {
             if !part.is_empty() {
                 let bytes: &[u8] = bytemuck::cast_slice(part);
                 self.uploaded_bytes += bytes.len() as u64;
@@ -3359,11 +3382,7 @@ impl Renderer {
             page,
             start,
             solid,
-            sides: if mesh.sides.quads() == solid {
-                mesh.sides
-            } else {
-                Sides::unsorted(solid)
-            },
+            sides,
             translucent,
             sort: translucency::SortState::new(
                 mesh.translucent

@@ -1261,9 +1261,7 @@ impl Game<'_> {
                         let one_hit = self
                             .as_guest(host, conn, |g| g.destroy_progress(pos))
                             .is_some_and(|p| p >= 1.0);
-                        if !one_hit
-                            && let Some(play) = host.play.get_mut(&conn)
-                        {
+                        if !one_hit && let Some(play) = host.play.get_mut(&conn) {
                             play.destroy_pos = Some(pos);
                         }
                     }

@@ -7760,8 +7760,8 @@ impl Game<'_> {
             .unwrap_or_default();
         let target = self
             .remote
-            .as_ref()
-            .and_then(|r| r.use_target)
+            .as_mut()
+            .and_then(|r| r.use_target.take())
             .map(|t| (t[0], t[1], t[2]));
         if menu == "minecraft:lectern" {
             // LecternScreen: the book and page come in the menu's content and data.

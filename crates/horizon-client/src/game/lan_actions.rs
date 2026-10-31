@@ -1223,7 +1223,6 @@ impl Game<'_> {
                     let play = host.play.entry(conn).or_default();
                     play.digging = Some((a.pos, face));
                     play.dig_start = host.hub.ticks;
-                    play.destroy_pos = Some(a.pos);
                     play.last_progress = -1;
                     // The pause between two blocks is the client's (MultiPlayerGameMode's
                     // destroyDelay); the server digs from the START it receives.
@@ -1254,6 +1253,19 @@ impl Game<'_> {
                         && let Some(play) = host.play.get_mut(&conn)
                     {
                         play.digging = None;
+                    }
+                    // ServerPlayerGameMode.handleBlockBreakAction writes `destroyPos`
+                    // only for a dig that takes more than one hit: a creative START
+                    // and an instant one leave no block behind for a later STOP.
+                    if destroyed != Some(true) {
+                        let one_hit = self
+                            .as_guest(host, conn, |g| g.destroy_progress(pos))
+                            .is_some_and(|p| p >= 1.0);
+                        if !one_hit
+                            && let Some(play) = host.play.get_mut(&conn)
+                        {
+                            play.destroy_pos = Some(pos);
+                        }
                     }
                 }
                 1 => {}

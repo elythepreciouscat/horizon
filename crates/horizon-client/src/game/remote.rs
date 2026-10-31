@@ -6007,7 +6007,10 @@ impl Game<'_> {
                 sequence: seq,
             }));
             if let Some(r) = self.remote.as_mut() {
-                r.destroying = None;
+                // `destroyBlockPos` remains the last target after the break;
+                // if that position is filled again before the next pick, a
+                // held attack resumes it without sending a second START.
+                r.destroying = Some((pos, face, 0.0));
                 r.is_destroying = false;
                 r.destroy_delay = 5;
             }

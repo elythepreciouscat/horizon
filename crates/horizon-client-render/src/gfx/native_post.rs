@@ -28,8 +28,10 @@ pub struct NativePost {
     /// and a black 1×1 in its place before then.
     history: Option<wgpu::Texture>,
     history_blank: wgpu::Texture,
-    /// One bind group per pass, for these world views.
-    groups: Option<(WorldViews, Vec<wgpu::BindGroup>)>,
+    /// One bind group per pass, for these world views and either the valid history or black.
+    groups: Option<(WorldViews, bool, Vec<wgpu::BindGroup>)>,
+    /// Whether `history` contains the last frame's input to the last pass.
+    history_valid: bool,
     /// The screen's colour format, the world target's too.
     format: wgpu::TextureFormat,
 }
@@ -52,6 +54,8 @@ pub struct NativeFrame {
     /// The eased eye light (block, sky) and being in water and lava (`write`); NaN until the
     /// first frame sets them.
     eye: [f32; 4],
+    /// A post stage must use black history after a long gap until it has rendered a frame.
+    history_reset: bool,
     start: std::time::Instant,
     frames: u32,
 }
@@ -147,6 +151,7 @@ impl NativeFrame {
             opaque_color,
             last: None,
             eye: [f32::NAN; 4],
+            history_reset: true,
             start: std::time::Instant::now(),
             frames: 0,
         }
@@ -235,7 +240,10 @@ impl NativeFrame {
                 inputs.camera_motion = (frame.camera - camera).as_vec3().to_array();
                 inputs.delta_time = (now - time).as_secs_f32();
             }
-            _ => self.eye = [f32::NAN; 4],
+            _ => {
+                self.eye = [f32::NAN; 4];
+                self.history_reset = true;
+            }
         }
         self.last = Some((view_proj, frame.camera, now));
         // The eye's light and medium eased by half-lives in seconds, from where they are at
@@ -256,6 +264,14 @@ impl NativeFrame {
         inputs.in_lava = lava;
         self.frames = self.frames.wrapping_add(1);
         queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&inputs));
+    }
+
+    /// Takes the post stage's pending history reset. It stays pending if post rendering is
+    /// skipped for a frame, so the first frame it does render still sees black history.
+    pub(super) fn take_history_reset(&mut self) -> bool {
+        let reset = self.history_reset;
+        self.history_reset = false;
+        reset
     }
 }
 
@@ -389,6 +405,7 @@ impl NativePost {
             history: None,
             history_blank: history_target(device, "Native shader pack history blank", [1, 1]),
             groups: None,
+            history_valid: false,
             format,
         })
     }
@@ -403,6 +420,7 @@ impl NativePost {
         device: &wgpu::Device,
         world: (&wgpu::TextureView, &wgpu::TextureView),
         size: [u32; 2],
+        history_reset: bool,
     ) {
         if self.passes.len() > 1 && self.targets.as_ref().is_none_or(|t| t.0 != size) {
             let target = |label| {
@@ -434,20 +452,27 @@ impl NativePost {
                 ],
             ));
             self.history = Some(history_target(device, "Native shader pack history", size));
+            self.history_valid = false;
             self.groups = None;
         }
+        let blank_history = history_reset || !self.history_valid;
         if self
             .groups
             .as_ref()
-            .is_some_and(|((color, depth), _)| color == world.0 && depth == world.1)
+            .is_some_and(|((color, depth), blank, _)| {
+                color == world.0 && depth == world.1 && *blank == blank_history
+            })
         {
             return;
         }
-        let history = self
-            .history
-            .as_ref()
-            .unwrap_or(&self.history_blank)
-            .create_view(&Default::default());
+        let history = if blank_history {
+            &self.history_blank
+        } else {
+            self.history
+                .as_ref()
+                .expect("history exists after a post stage has more than one pass")
+        }
+        .create_view(&Default::default());
         let groups = (0..self.passes.len())
             .map(|i| {
                 // Pass i reads what pass i - 1 wrote: target (i - 1) % 2, the world for the first.
@@ -491,7 +516,7 @@ impl NativePost {
                 })
             })
             .collect();
-        self.groups = Some(((world.0.clone(), world.1.clone()), groups));
+        self.groups = Some(((world.0.clone(), world.1.clone()), blank_history, groups));
     }
 
     /// Runs the passes over the world target `world` (colour, depth) of `size`, the last onto
@@ -503,13 +528,14 @@ impl NativePost {
         world: (&wgpu::TextureView, &wgpu::TextureView),
         screen: &wgpu::TextureView,
         size: [u32; 2],
+        history_reset: bool,
         mut timing: Option<&mut super::pack_timing::PassTiming>,
     ) {
-        self.prepare(device, world, size);
+        self.prepare(device, world, size, history_reset);
         if let Some(t) = timing.as_deref_mut() {
             t.mark(device, encoder, (world.0, self.format));
         }
-        let Some((_, groups)) = &self.groups else {
+        let Some((_, _, groups)) = &self.groups else {
             return;
         };
         for (i, ((label, pipeline), group)) in self.passes.iter().zip(groups).enumerate() {
@@ -547,6 +573,7 @@ impl NativePost {
                 history.as_image_copy(),
                 history.size(),
             );
+            self.history_valid = true;
         }
     }
 }
@@ -747,7 +774,15 @@ mod tests {
             ..Default::default()
         });
         let view = screen.create_view(&Default::default());
-        post.run(&device, &mut encoder, (&color, &depth), &view, [4, 4], None);
+        post.run(
+            &device,
+            &mut encoder,
+            (&color, &depth),
+            &view,
+            [4, 4],
+            true,
+            None,
+        );
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT * 4),
@@ -823,7 +858,7 @@ file = \"b.wgsl\"
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut frame_pixel = || {
+        let mut frame_pixel = |history_reset| {
             let mut encoder = device.create_command_encoder(&Default::default());
             encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
@@ -838,7 +873,15 @@ file = \"b.wgsl\"
                 })],
                 ..Default::default()
             });
-            post.run(&device, &mut encoder, (&color, &depth), &view, [4, 4], None);
+            post.run(
+                &device,
+                &mut encoder,
+                (&color, &depth),
+                &view,
+                [4, 4],
+                history_reset,
+                None,
+            );
             encoder.copy_texture_to_buffer(
                 screen.as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
@@ -860,11 +903,21 @@ file = \"b.wgsl\"
             buffer.unmap();
             pixel
         };
-        assert_eq!(frame_pixel()[..3], [0, 0, 0], "black on the first frame");
-        let second = frame_pixel();
+        assert_eq!(
+            frame_pixel(true)[..3],
+            [0, 0, 0],
+            "black on the first frame"
+        );
+        let second = frame_pixel(false);
         assert!(
             second[..3].iter().all(|&v| v.abs_diff(128) <= 1),
             "{second:?}"
+        );
+        assert_eq!(frame_pixel(true)[..3], [0, 0, 0], "black after a frame gap");
+        let fourth = frame_pixel(false);
+        assert!(
+            fourth[..3].iter().all(|&v| v.abs_diff(128) <= 1),
+            "{fourth:?}"
         );
     }
 }

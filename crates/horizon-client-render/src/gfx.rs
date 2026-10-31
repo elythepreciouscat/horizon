@@ -5876,12 +5876,14 @@ impl Renderer {
             && let Some(post) = &mut native.post
         {
             let size = self.world_post.size().unwrap_or([1, 1]);
+            let history_reset = native.frame.take_history_reset();
             post.run(
                 &self.device,
                 &mut encoder,
                 (color, depth),
                 &view_target,
                 size,
+                history_reset,
                 native.timing.as_mut(),
             );
         } else if scaled.is_some() {

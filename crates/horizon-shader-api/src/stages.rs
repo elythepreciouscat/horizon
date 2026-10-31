@@ -70,7 +70,7 @@ const POST_RESOURCES: [Resource; 7] = [
         binding: 8,
         name: "history",
         ty: "var history: texture_2d<f32>",
-        doc: "Last frame's input to the last pass (what the pass before it wrote), for temporal passes (TAA, denoising): put such a pass second to last and it reads its own previous output; reproject with `frame.previous_view_projection`. Black on the first frame and with a single pass.",
+        doc: "Last frame's input to the last pass (what the pass before it wrote), for temporal passes (TAA, denoising): put such a pass second to last and it reads its own previous output; reproject with `frame.previous_view_projection`. Black on the first frame, after a gap of over half a second, and with a single pass.",
     },
 ];
 

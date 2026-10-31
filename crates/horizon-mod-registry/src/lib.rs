@@ -725,15 +725,31 @@ fn date(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// A key for submission tags, separate from the signed-cookie format. Keeping
+/// the domains distinct means a public tag can never be repackaged as a
+/// session cookie.
+fn submission_key(config: &Config) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(&config.session_key).expect("any key length");
+    mac.update(b"submission-tag-v1");
+    mac.finalize().into_bytes().into()
+}
+
 /// What a submission branch's commit carries to say the form wrote it for
-/// `login`: signed with the service's key, so a retry by the same account
-/// may start that branch again.
+/// `login`: signed with the service's submission key, so a retry by the same
+/// account may start that branch again.
 fn submission_tag(config: &Config, branch: &str, login: &str) -> String {
-    let signed = sign(
-        &config.session_key,
-        &format!("submission\n{branch}\n{}", login.to_lowercase()),
-    );
-    signed.rsplit('.').next().unwrap_or("").to_owned()
+    let mut mac = Hmac::<Sha256>::new_from_slice(&submission_key(config)).expect("32 bytes");
+    mac.update(format!("submission\n{branch}\n{}", login.to_lowercase()).as_bytes());
+    URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+}
+
+fn submission_tag_valid(config: &Config, branch: &str, login: &str, tag: &str) -> bool {
+    let Ok(tag) = URL_SAFE_NO_PAD.decode(tag) else {
+        return false;
+    };
+    let mut mac = Hmac::<Sha256>::new_from_slice(&submission_key(config)).expect("32 bytes");
+    mac.update(format!("submission\n{branch}\n{}", login.to_lowercase()).as_bytes());
+    mac.verify_slice(&tag).is_ok()
 }
 
 /// The trailer of an owner update's pull request: a comment holding what the
@@ -945,7 +961,7 @@ pub fn publish(
     let branch = format!("submit/{}-{}", form.id, version.version);
     // Its commit's record of whose it is: only this service can write it,
     // where a commit's text or author can be anyone's who writes to the repository.
-    let submission = format!("Submission: {}", submission_tag(config, &branch, login));
+    let submission = submission_tag(config, &branch, login);
     if !gh.branch(&branch).map_err(github_down)? {
         // The branch is there: a pull request, someone else's submission, or
         // this submitter's own that GitHub broke off (a timeout past the
@@ -962,9 +978,13 @@ pub fn publish(
         }
         let commits = gh.commits(&branch).map_err(github_down)?;
         let theirs = commits.len() <= 1
-            && commits
-                .iter()
-                .all(|m| m.lines().any(|l| l.trim() == submission));
+            && commits.iter().all(|m| {
+                m.lines().any(|line| {
+                    line.trim()
+                        .strip_prefix("Submission:")
+                        .is_some_and(|tag| submission_tag_valid(config, &branch, login, tag.trim()))
+                })
+            });
         if !theirs {
             return Err(Refusal::new(
                 StatusCode::CONFLICT,
@@ -978,7 +998,7 @@ pub fn publish(
     }
     let what = if is_new { "Add" } else { "Update" };
     let message = format!(
-        "{what} {} {}\n\nSubmitted by @{login} through the form.\n\n{submission}\nCo-authored-by: {login} <{user_id}+{login}@users.noreply.github.com>",
+        "{what} {} {}\n\nSubmitted by @{login} through the form.\n\nSubmission: {submission}\nCo-authored-by: {login} <{user_id}+{login}@users.noreply.github.com>",
         form.id, version.version
     );
     gh.put(
@@ -1187,5 +1207,32 @@ mod tests {
             signed.split_once('.').unwrap().1
         );
         assert_eq!(unsign(key, &forged), None);
+    }
+
+    #[test]
+    fn submission_tags_are_not_session_cookies() {
+        let key = b"0123456789abcdef0123456789abcdef";
+        let config = Config {
+            public_url: "https://example.invalid".into(),
+            session_key: key.to_vec(),
+            github: GitHub::new(
+                github::Endpoints::default(),
+                "owner/repo".into(),
+                "client".into(),
+                "secret".into(),
+                "token".into(),
+            ),
+            update_key: None,
+            scratch: PathBuf::from("/tmp/horizon-mod-registry-test"),
+            database: PathBuf::from(":memory:"),
+        };
+        let branch = "submit/example-1.0.0";
+        let login = "12345678901";
+        let tag = submission_tag(&config, branch, login);
+        assert!(submission_tag_valid(&config, branch, login, &tag));
+
+        let payload = format!("submission\n{branch}\n{login}");
+        let cookie = format!("{}.{}", URL_SAFE_NO_PAD.encode(payload), tag);
+        assert_eq!(unsign(&config.session_key, &cookie), None);
     }
 }

@@ -16,6 +16,19 @@ use std::sync::Arc;
 /// ClientPacketListener.sendChatAcknowledgement's threshold.
 const ACK_AFTER: i32 = 64;
 
+/// `FriendlyByteBuf.readUtf(256)` counts UTF-16 code units, not Unicode scalar
+/// values. Keep a whole scalar at the boundary so the wire string is valid.
+fn truncate_utf16(content: &str, max_units: usize) -> String {
+    let mut units = 0;
+    content
+        .chars()
+        .take_while(|ch| {
+            let next = units + ch.len_utf16();
+            (next <= max_units).then(|| units = next).is_some()
+        })
+        .collect()
+}
+
 /// A connection's secure chat state, new with every login packet.
 #[derive(Default)]
 pub(super) struct SecureChat {
@@ -119,7 +132,7 @@ impl Game<'_> {
     /// ClientPacketListener.sendChat: the last-seen update goes with every
     /// message; the signature only with a chat session.
     pub(super) fn send_signed_chat(&mut self, content: &str) {
-        let content: String = content.chars().take(256).collect();
+        let content = truncate_utf16(content, 256);
         let (timestamp, salt) = (auth::now_millis(), salt());
         let Some(r) = self.remote.as_mut() else {
             return;
@@ -155,10 +168,13 @@ impl Game<'_> {
         let Some(r) = self.remote.as_mut() else {
             return;
         };
-        let arguments = r
-            .chat_tree
-            .parse(command, &self.ui.registries)
-            .signable_arguments(&r.chat_tree);
+        let arguments: Vec<(String, String)> = if r.chat_tree_received {
+            r.chat_tree
+                .parse(command, &self.ui.registries)
+                .signable_arguments(&r.chat_tree)
+        } else {
+            Vec::new()
+        };
         if arguments.is_empty() {
             self.send(S::ChatCommand(play::ChatCommand {
                 command: command.to_owned(),
@@ -221,5 +237,30 @@ impl Game<'_> {
             let offset = tracker.take_offset();
             self.send(S::ChatAck(play::ChatAck { offset }));
         }
+    }
+
+    /// `ClientPacketListener.sendChatAcknowledgement`, used after a
+    /// configuration transition flushes the delayed chat queue.
+    pub(super) fn send_chat_acknowledgement(&mut self) {
+        let offset = self
+            .remote
+            .as_mut()
+            .map(|r| r.secure_chat.tracker.take_offset())
+            .unwrap_or(0);
+        self.send(S::ChatAck(play::ChatAck { offset }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_utf16;
+
+    #[test]
+    fn chat_limit_counts_utf16_units() {
+        let emojis = "😀".repeat(256);
+        assert_eq!(truncate_utf16(&emojis, 256).encode_utf16().count(), 256);
+        assert_eq!(truncate_utf16(&emojis, 255).encode_utf16().count(), 254);
+        let mixed = format!("{}😀tail", "a".repeat(255));
+        assert_eq!(truncate_utf16(&mixed, 256), "a".repeat(255));
     }
 }

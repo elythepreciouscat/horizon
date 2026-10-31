@@ -359,6 +359,10 @@ pub(super) struct Remote {
     /// plus the commands native mods own (`chat::chat_tree_for`). Rebuilt where
     /// that base changes, not at each keystroke.
     pub chat_tree: horizon_client::command::Dispatcher,
+    /// Whether a `ClientboundCommandsPacket` has supplied the server's tree.
+    /// The local fallback is for UI completion only; vanilla signs command
+    /// arguments against an empty tree until the server sends one.
+    pub(super) chat_tree_received: bool,
     /// The chat session, the last-seen window and the signature cache.
     pub(super) secure_chat: super::remote_chat::SecureChat,
     /// `ClientSuggestionProvider.customCompletionSuggestions`: the extra chat
@@ -744,6 +748,7 @@ impl Game<'_> {
             signatures: Default::default(),
             chat_previous: None,
             chat_tree,
+            chat_tree_received: false,
             secure_chat: Default::default(),
             custom_completions: Default::default(),
             players: HashMap::new(),
@@ -1426,6 +1431,7 @@ impl Game<'_> {
                     // handleConfigurationStart: the held-back chat shows, then
                     // clearClientLevel opens ServerReconfigScreen over no level.
                     self.flush_chat_queue();
+                    self.send_chat_acknowledgement();
                     self.close_dialogs();
                     self.player = None;
                     self.screen = Screen::Playing;
@@ -1433,6 +1439,7 @@ impl Game<'_> {
                     let ticks = self.ticks;
                     if let Some(r) = self.remote.as_mut() {
                         r.reconfiguring = Some(ticks);
+                        r.chat_tree_received = false;
                     }
                 }
                 Event::Reconfigured(registries) => {
@@ -3718,6 +3725,7 @@ impl Game<'_> {
                 let chat_tree = self.chat_tree_for(Some(&tree));
                 if let Some(r) = self.remote.as_mut() {
                     r.chat_tree = chat_tree;
+                    r.chat_tree_received = true;
                 }
             }
             C::Cooldown(p) => {

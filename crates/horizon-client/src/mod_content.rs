@@ -343,6 +343,8 @@ struct NewItem {
 struct Plan<'a> {
     blocks: Vec<NewBlock<'a>>,
     items: Vec<NewItem>,
+    /// Every vanilla item id, including items omitted from the search tab.
+    vanilla_items: BTreeSet<String>,
     effects: Vec<&'a MobEffect>,
     /// Vanilla's state count (the tables' length before).
     states: usize,
@@ -395,6 +397,13 @@ fn read_json(path: &Path) -> Result<J> {
 
 impl<'a> Plan<'a> {
     fn new(base: &Path, mods: &'a [ContentMod]) -> Result<Self> {
+        let vanilla_items = match base.join("items.json").exists() {
+            true => match read_json(&base.join("items.json"))? {
+                J::Obj(entries) => entries.into_iter().map(|(id, _)| id).collect(),
+                _ => return Err("items.json is not an object".into()),
+            },
+            false => BTreeSet::new(),
+        };
         let mut facts = read_json(&base.join("facts.json"))?;
         let names: Vec<String> = match facts.at("states") {
             Some(J::Arr(states)) => states
@@ -632,6 +641,7 @@ impl<'a> Plan<'a> {
         Ok(Plan {
             blocks,
             items,
+            vanilla_items,
             effects: mob_effects(mods),
             states: names.len(),
             defaults,
@@ -973,22 +983,7 @@ impl<'a> Plan<'a> {
         let search = tabs
             .iter()
             .position(|t| matches!(t.get("type"), Some(J::Str(k)) if k == "SEARCH"));
-        let vanilla: BTreeSet<String> = match search.and_then(|i| tabs[i].get("items")) {
-            Some(J::Arr(items)) => items
-                .iter()
-                .filter_map(|s| match s {
-                    J::Str(s) => s
-                        .split("id:\"")
-                        .nth(1)?
-                        .split('"')
-                        .next()
-                        .map(str::to_owned),
-                    _ => None,
-                })
-                .collect(),
-            _ => BTreeSet::new(),
-        };
-        let known = |id: &str| new.contains(&id) || vanilla.contains(id);
+        let known = |id: &str| new.contains(&id) || self.vanilla_items.contains(id);
         for (i, tab) in self.tabs.iter().enumerate() {
             let slot = i % 10;
             let mut row = J::Obj(Vec::new());

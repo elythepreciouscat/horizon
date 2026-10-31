@@ -67,6 +67,49 @@ fn item_components_patch_the_template_entry() {
     }
 }
 
+#[test]
+fn creative_tabs_keep_vanilla_items_missing_from_search() {
+    let tab = horizon_mods::content::CreativeTab {
+        id: "test:restricted".into(),
+        title: "Restricted".into(),
+        icon: "minecraft:barrier".into(),
+        items: [
+            "minecraft:barrier",
+            "minecraft:command_block",
+            "minecraft:written_book",
+            "minecraft:knowledge_book",
+        ]
+        .map(str::to_owned)
+        .into(),
+    };
+    let plan = Plan {
+        blocks: Vec::new(),
+        items: Vec::new(),
+        vanilla_items: tab.items.iter().cloned().collect(),
+        effects: Vec::new(),
+        states: 0,
+        defaults: BTreeMap::new(),
+        sounds: BTreeMap::new(),
+        tabs: vec![&tab],
+        names: BTreeMap::new(),
+    };
+    let mut doc: J = serde_json::from_str(
+        r#"{"tabs":[{"type":"SEARCH","items":["{count:1,id:\"minecraft:stone\"}"]}]}"#,
+    )
+    .unwrap();
+    plan.creative_tabs(&mut doc).unwrap();
+    let doc: serde_json::Value = serde_json::to_value(doc).unwrap();
+    assert_eq!(
+        doc["tabs"][1]["items"],
+        serde_json::json!([
+            "{count:1,id:\"minecraft:barrier\"}",
+            "{count:1,id:\"minecraft:command_block\"}",
+            "{count:1,id:\"minecraft:written_book\"}",
+            "{count:1,id:\"minecraft:knowledge_book\"}",
+        ])
+    );
+}
+
 /// A block item's patch goes over its template block's item, and a type no
 /// vanilla item has fails the build.
 #[test]

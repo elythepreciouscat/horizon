@@ -13044,6 +13044,9 @@ impl Game<'_> {
         if let Some(step) =
             Self::creative_page_button(ox, oy, (cx, cy), self.creative_screen.pages())
         {
+            // Page buttons are outside the inventory panel; their release must
+            // not throw a carried stack, including when the button is disabled.
+            self.inv_clicks.skip_release();
             let page = self.creative_screen.page as i64 + step;
             if (0..self.creative_screen.pages() as i64).contains(&page) {
                 self.audio.play_button_click();

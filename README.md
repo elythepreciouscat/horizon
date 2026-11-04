@@ -7,7 +7,7 @@ Paired release-build comparison captured 2026-11-04. This supersedes the older l
 - PR head: `3ec390a6b8b56db316e759bcd332c26a2160d600` (`fix/pr8941-review`).
 - Main baseline: `f40d4df781963ed0a6e1e0fd41bf740f652e2e46` (`origin/main`).
 - Both binaries use the `release` profile. Main was built from a detached worktree with `cargo build --release -p horizon-client -j 2`; no `-j 8` was used.
-- OpenGL, offscreen 1280×720, render distance 8, Intel HD Graphics 4000 / Mesa 26.2.4.
+- Test host: Intel Core i7-3770S (4 cores / 8 threads, 3.1 GHz base), 8 GiB RAM (7.5 GiB available to Linux), Intel HD Graphics 4000 (IVB GT2, 1.5 GiB shared video memory), Mesa 26.2.4. OpenGL, offscreen 1280×720, render distance 8. CPU frequency scaling is enabled (1.6–3.9 GHz), and this desktop was not isolated from background work. Treat short-run deltas as noisy; a stronger machine should independently repeat the comparison.
 - FPS overlay enabled; entity-culling precheck set to 64 on the PR build.
 - PR binary SHA-256: `175d02dcf0fc752ce4704ce3b6b0949f4ccc311d546e6b432c0a8915a7be19fa`.
 - Main binary SHA-256: `52c3ac0fbc75a481221de94e1825331e468c63a7b637eebea3b2a3dd5fa40081`.

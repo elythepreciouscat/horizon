@@ -269,6 +269,9 @@ pub struct Hub {
     pub native_menu_events: Vec<super::menu::NativeMenuEvent>,
     /// Kicks waiting for the game thread to notify native mods.
     pending_kicks: Vec<HostEvent>,
+    /// `[transfer]` on (a dedicated server's `--transfers`): the players a proxy
+    /// said would arrive (`player-expect`). None while it is off.
+    pub transfers: Option<super::arrivals::Transfers>,
     /// The entities players started and stopped tracking, collected by
     /// `collect_tracking`, for the game to tell the mods.
     pub native_tracking: Vec<TrackingBatch>,
@@ -670,6 +673,7 @@ impl Hub {
             mod_commands: (serde_json::Value::Null, None),
             native_menu_events: Vec::new(),
             pending_kicks: Vec::new(),
+            transfers: None,
             native_tracking: Vec::new(),
             attachment_snapshots: Vec::new(),
             sync_attachments: false,
@@ -999,6 +1003,43 @@ impl Hub {
         );
     }
 
+    /// Lets go of what a proxy that stopped answering left behind: the players
+    /// it said would come and did not, and the freezes no hand-over ended.
+    /// Neither may last for ever.
+    fn expire_arrivals(&mut self, events: &mut Vec<HostEvent>) {
+        // Off: nothing to do (and no player can be frozen).
+        let Some(transfers) = &self.transfers else {
+            return;
+        };
+        for uuid in transfers.table().expire(std::time::Instant::now()) {
+            events.push(HostEvent::Warn(format!(
+                "player {} was expected from another server and never came",
+                horizon_protocol::crypto::uuid_string(uuid)
+            )));
+        }
+        let max = transfers.settings.max_freeze_ticks;
+        for g in &mut self.guests {
+            let Some(h) = &g.handover else {
+                continue;
+            };
+            // A frozen player takes no damage, but the void and `/kill` still kill: its
+            // record is then not what is left of it, and `player-release moved` must fail.
+            if g.dead {
+                g.handover = None;
+                events.push(HostEvent::Warn(format!(
+                    "{} died while frozen for a hand-over: the hand-over is over",
+                    g.name,
+                )));
+            } else if super::arrivals::frozen_too_long(h.since, self.ticks, max) {
+                g.handover = None;
+                events.push(HostEvent::Warn(format!(
+                    "{} was frozen for a hand-over for {max} ticks and nothing finished it: let go",
+                    g.name,
+                )));
+            }
+        }
+    }
+
     /// Whether a player of `permission` sees the player `uuid`: not one a
     /// native mod hid from players below a higher level.
     pub fn sees(&self, permission: u8, uuid: u128) -> bool {
@@ -1205,7 +1246,7 @@ impl Hub {
         let joined = C::SystemChat(play::SystemChat {
             content: yellow_names(
                 "multiplayer.player.joined",
-                vec![display_name(self.guests[i].uuid, &name)],
+                vec![self.player_display_name(self.guests[i].uuid, &name)],
             ),
             overlay: false,
         })
@@ -1713,6 +1754,7 @@ impl Hub {
         self.ticks += 1;
         self.anticheat_tick(ctx.tick_rate);
         let mut events = std::mem::take(&mut self.pending_kicks);
+        self.expire_arrivals(&mut events);
         for event in self.lan.poll() {
             match event {
                 NetEvent::Joined(j) => {
@@ -1787,6 +1829,41 @@ impl Hub {
         events
     }
 
+    /// Keeps, in a frozen player's inbox, the packets that answer the server
+    /// (teleport, chunk batch, loaded, keep-alive, ping, tick end, client
+    /// information) and drops the rest. A chat message or signed command is
+    /// dropped too, but the messages it says the client has seen are taken
+    /// first (`unpackAndApplyLastSeen`), and a chat acknowledgement is handled
+    /// here, in the order they came: the client counts them as acknowledged,
+    /// and its next message after the freeze would not validate otherwise.
+    pub(crate) fn keep_acknowledgements(&mut self, i: usize, events: &mut Vec<HostEvent>) {
+        let inbox = std::mem::take(&mut self.guests[i].inbox);
+        let mut bytes = 0;
+        for (packet, size) in inbox {
+            match &packet {
+                S::Chat(c) => {
+                    self.apply_last_seen(i, &c.last_seen, events);
+                }
+                S::ChatCommandSigned(c) => {
+                    self.apply_last_seen(i, &c.last_seen, events);
+                }
+                S::ChatAck(c) => self.chat_ack(i, c.offset, events),
+                S::AcceptTeleportation(_)
+                | S::PlayerLoaded(_)
+                | S::ChunkBatchReceived(_)
+                | S::ClientInformation(_)
+                | S::ClientTickEnd(_)
+                | S::KeepAlive(_)
+                | S::Pong(_) => {
+                    bytes += size;
+                    self.guests[i].inbox.push_back((packet, size));
+                }
+                _ => {}
+            }
+        }
+        self.guests[i].inbox_bytes = bytes;
+    }
+
     /// Handle the players in this level's packets (`ServerGamePacketListenerImpl`
     /// for each), before the level's scheduled block ticks so a place landed in
     /// the same tick as a falling block's schedule still sees the support
@@ -1797,10 +1874,19 @@ impl Hub {
         let timed = crate::spans::recording_here();
         for i in 0..self.guests.len() {
             if self.here(&self.guests[i]) {
+                let frozen = self.guests[i].handover.is_some();
+                if frozen {
+                    // Frozen for a hand-over: it answers the server and nothing more.
+                    self.keep_acknowledgements(i, &mut events);
+                }
                 let started = timed.then(std::time::Instant::now);
                 let waiting = self.guests[i].inbox.len();
                 self.process_inbox(i, ctx, &mut events);
-                self.tick_floating(i, &mut events);
+                // Its moves are dropped, so whether the last one left it floating is
+                // stale: a player frozen in a jump is not kicked for flying.
+                if !frozen {
+                    self.tick_floating(i, &mut events);
+                }
                 // A slow tick's line says whose packets took it (`spans::note`).
                 if let Some(started) = started {
                     let g = &self.guests[i];
@@ -1848,10 +1934,12 @@ impl Hub {
         if ctx.world.light_log.is_none() {
             ctx.world.light_log = Some(Default::default());
         }
-        self.sync_world(ctx);
+        crate::spans::time("lan_sync_world", || self.sync_world(ctx));
         crate::spans::time("lan_chunks", || self.update_chunks(ctx));
-        self.broadcast_light_changes(ctx.world);
-        self.broadcast_block_changes(ctx.world);
+        crate::spans::time("lan_block_changes", || {
+            self.broadcast_light_changes(ctx.world);
+            self.broadcast_block_changes(ctx.world);
+        });
         // ServerGamePacketListenerImpl.tick: the actions handled since the last tick are
         // acknowledged after the block changes they made were sent, so a client's predicted
         // blocks settle on the server's states.
@@ -1861,15 +1949,17 @@ impl Hub {
                 g.send(&C::BlockChangedAck(play::BlockChangedAck { sequence }));
             }
         }
-        self.sync_containers(ctx.world);
+        crate::spans::time("lan_containers", || self.sync_containers(ctx.world));
         self.sync_hidden();
-        self.track_entities(ctx);
-        for i in 0..self.guests.len() {
-            if self.here(&self.guests[i]) {
-                self.sync_player_state(i);
-                self.sync_effects(i);
+        crate::spans::time("lan_track_entities", || self.track_entities(ctx));
+        crate::spans::time("lan_player_state", || {
+            for i in 0..self.guests.len() {
+                if self.here(&self.guests[i]) {
+                    self.sync_player_state(i);
+                    self.sync_effects(i);
+                }
             }
-        }
+        });
         events
     }
 
@@ -1950,7 +2040,7 @@ impl Hub {
         let left = C::SystemChat(play::SystemChat {
             content: yellow_names(
                 "multiplayer.player.left",
-                vec![display_name(g.uuid, &g.name)],
+                vec![self.player_display_name(g.uuid, &g.name)],
             ),
             overlay: false,
         })
@@ -1959,9 +2049,53 @@ impl Hub {
             if o.tab_hidden.remove(&g.uuid) {
                 continue;
             }
-            o.sender.send(left.clone());
+            if !g.quiet_leave {
+                o.sender.send(left.clone());
+            }
         }
         g
+    }
+
+    /// Takes the frozen player `uuid` out of the world because a proxy moved it to another
+    /// server, for the hand-over `id`: the others see it go (its entity and its player-list
+    /// entry), but nothing is saved (the other server has the player now) and, unless
+    /// `announce`, the "left the game" line is not sent. The game is told it left, marked
+    /// released, so it saves nothing.
+    ///
+    /// Refused when the player is not in that hand-over: another one, or none because the
+    /// freeze ran out (the player has played on since, and the record the other server has is
+    /// older), or a player who died while frozen.
+    pub fn release_moved(
+        &mut self,
+        uuid: u128,
+        id: u128,
+        announce: bool,
+    ) -> Result<(), &'static str> {
+        let i = self.handover_of(uuid, id)?;
+        let g = &mut self.guests[i];
+        g.quiet_leave = !announce;
+        g.left_reason = "moved to another server".to_owned();
+        g.sender
+            .disconnect(translatable("multiplayer.disconnect.generic", &[]));
+        let mut gone = self.remove_guest(i, "moved to another server");
+        gone.released = true;
+        gone.handover = None;
+        self.pending_kicks.push(HostEvent::Left(Box::new(gone)));
+        Ok(())
+    }
+
+    /// The guest index of the player `uuid` while it is frozen for the hand-over `id`.
+    pub fn handover_of(&self, uuid: u128, id: u128) -> Result<usize, &'static str> {
+        let Some(i) = self.guests.iter().position(|g| g.uuid == uuid) else {
+            return Err("that player is not connected to this server");
+        };
+        let g = &self.guests[i];
+        match &g.handover {
+            _ if g.dead => Err("that player died during the hand-over"),
+            None => Err("that player is not in a hand-over (or its freeze ran out)"),
+            Some(h) if h.id != id => Err("that is not the player's current hand-over"),
+            Some(_) => Ok(i),
+        }
     }
 
     /// `ServerTickRateManager.updateStepTicks` / `updateStateToClients`:
@@ -4500,7 +4634,7 @@ mod tests {
     fn hub_with_sync(sync: SyncData) -> (Hub, std::sync::mpsc::Receiver<crate::lan::Out>) {
         let config = crate::lan::NetConfig {
             announce: false,
-            ..crate::lan::NetConfig::lan(0, "EffectSyncTest".into(), 2)
+            ..crate::lan::NetConfig::loopback(0, "EffectSyncTest".into(), 2)
         };
         let sync = std::sync::Arc::new(sync);
         let lan = Lan::start_with(sync.clone(), config).unwrap();
@@ -4537,6 +4671,7 @@ mod tests {
                 sender: crate::lan::PlayerSender::new(tx, std::sync::Arc::default()),
                 latency: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
                 address: "127.0.0.1:25565".parse().unwrap(),
+                expected: false,
             },
             1,
             [0.5, 64.0, 0.5],

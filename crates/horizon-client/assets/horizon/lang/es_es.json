@@ -123,6 +123,7 @@
   "Done": "Hecho",
   "This feature is not yet available in Horizon.": "Esta función aún no está disponible en Horizon.",
   "Your display or system doesn't offer HDR output.": "Tu pantalla o sistema no ofrece salida HDR.",
+  "Only applies to asynchronous entity culling.": "Solo se aplica a la oclusión asíncrona de entidades.",
   "Turn HDR on to use it.": "Activa el HDR para usarlo.",
   "%s chunks": "%s chunks",
   "%s per frame": "%s por fotograma",
@@ -254,5 +255,6 @@
   "horizon.tempban.success": "%1$s durante %2$s, hasta %3$s",
   "horizon.tempban.list.empty": "No hay baneos temporales",
   "horizon.tempban.list.count": "Hay %s baneo(s) temporal(es):",
-  "horizon.tempban.list.entry": "%1$s fue baneado por %2$s %3$s (hasta %4$s)"
+  "horizon.tempban.list.entry": "%1$s fue baneado por %2$s %3$s (hasta %4$s)",
+  "Shader Packs...": "Paquetes de shaders..."
 }

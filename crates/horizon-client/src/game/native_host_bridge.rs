@@ -5,13 +5,13 @@
 //! (docs/native-mods.md, "Trait mods"). Each goes through the helper or the
 //! state the game's own code uses, so both answer alike.
 use super::Game;
+use horizon_client::actions::Action;
 use horizon_client::{
     containers::{BlockEntity, ModBlockEntity},
     items::ItemStack,
     particles::ParticleOptions,
 };
 use horizon_world::{player_inventory::EquipmentSlot, registry::BlockStateId};
-use winit::keyboard::KeyCode;
 
 // Native mods use these; nothing in Horizon does.
 #[allow(dead_code)]
@@ -97,7 +97,9 @@ impl Game<'_> {
     /// which a player has none of. API @API:host_bridge@.
     pub(super) fn native_equipment(&self, slot: EquipmentSlot) -> Option<ItemStack> {
         match slot {
-            EquipmentSlot::MainHand => self.held().cloned(),
+            // The selected slot, not `held`: that is the acting hand, the off hand's stack during
+            // the off-hand pass of a use (`with_hand(Hand::Off, ..)`).
+            EquipmentSlot::MainHand => self.inventory.get(self.selected).cloned().flatten(),
             EquipmentSlot::OffHand => self.offhand.clone(),
             EquipmentSlot::Head => self.armor[0].clone(),
             EquipmentSlot::Chest => self.armor[1].clone(),
@@ -115,6 +117,67 @@ impl Game<'_> {
     /// (`as_guest` holds sneak for them); on a client the player's own key.
     /// API @API:host_bridge@.
     pub(super) fn native_sneaking(&self) -> bool {
-        self.keys.contains(&KeyCode::ShiftLeft)
+        self.keys.held(Action::Sneak)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::game::{Audio, Game, Options, Progress, Settings, load_resources};
+    use horizon_client::{first_person::Hand, items::ItemStack};
+    use horizon_world::player_inventory::EquipmentSlot;
+
+    /// `LivingEntity.getItemBySlot` doesn't depend on the hand acting: in the
+    /// off-hand pass of a use, the main hand is still the selected slot's.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn equipment_reads_the_main_hand_in_an_off_hand_pass() {
+        let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+        let settings = Settings::default();
+        let loaded = load_resources(
+            root.clone(),
+            None,
+            &root,
+            &settings,
+            std::time::Instant::now(),
+            false,
+            true,
+            &Progress::new(),
+            &mut |_, _| unreachable!(),
+        )
+        .unwrap();
+        let mut options = Options::parse(std::iter::empty()).unwrap().unwrap();
+        options.resources = root.clone();
+        let mut game = Game::new(
+            &loaded.resources,
+            loaded.pack,
+            loaded.gui.unwrap(),
+            options,
+            settings,
+            Audio::silent(&root),
+            None,
+        )
+        .unwrap();
+        let name = |stack: Option<ItemStack>| stack.map(|s| s.item.to_string());
+        game.inventory[game.selected] = Some(ItemStack::new("minecraft:stick", 1));
+        game.offhand = Some(ItemStack::new("minecraft:torch", 1));
+        for hand in [Hand::Main, Hand::Off] {
+            game.with_hand(hand, |g| {
+                assert_eq!(
+                    name(g.native_equipment(EquipmentSlot::MainHand)).as_deref(),
+                    Some("minecraft:stick"),
+                    "{hand:?}"
+                );
+                assert_eq!(
+                    name(g.native_equipment(EquipmentSlot::OffHand)).as_deref(),
+                    Some("minecraft:torch"),
+                    "{hand:?}"
+                );
+            });
+        }
+        game.inventory[game.selected] = None;
+        game.with_hand(Hand::Off, |g| {
+            assert!(g.native_equipment(EquipmentSlot::MainHand).is_none());
+        });
     }
 }

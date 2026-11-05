@@ -55,9 +55,10 @@ The opening, then Play ([clip](docs/opening.webm)):
   starts the game. With no install on the computer the Play page offers the download alone and the
   Minecraft folder row says none is needed. Without an owner,
   the Play page asks to sign in first. `horizon-launcher prepare --download`.
-- **Mods**: tabs for Mods, Modpacks, Resource packs, Shader packs and Data packs. Mods, Modpacks
-  and Resource packs search Horizon's own registry or Modrinth (CurseForge support is coming soon);
-  Shader packs search the registry, Data packs Modrinth (into the world picked there). A Java
+- **Mods**: tabs for Mods, Modpacks, Resource packs, Shader packs and Data packs. Mods, Modpacks,
+  Resource packs and Data packs (into the world picked there) search Horizon's own registry, with
+  its categories as filters, or Modrinth (CurseForge support is coming soon); Shader packs search
+  the registry. A Java
   instance's files come from Modrinth for its version and loader; on a Horizon instance, Modrinth's
   Java mods are listed too, each marked Works, Partly or Doesn't run in Horizon. Install puts a file in
   the game folder only after its SHA-512 matches, and a
@@ -269,7 +270,8 @@ page `servers.json` (the list), `servers/<name>/` (the servers created there) an
   game starts. `horizon-launcher game-args "<line>"` sets them too, and `play --arg <ARG>` passes
   one for a single run.
 - **Proxy**: when the internet here needs one (a school's, an office's, a country where a host is
-  unreachable), Settings' Proxy takes the `http://host:port` address your proxy app listens on, and
+  unreachable), Settings' Proxy takes the `http://host:port` or `socks5://host:port` address your
+  proxy app listens on, and
   every download goes through it: Horizon's releases and the launcher's own update, Minecraft's
   files and Java from Mojang, Modrinth, CurseForge, Horizon's mod registry, pictures, Microsoft
   sign-in, and the jars a modpack import fetches. It is kept as `proxy` in `settings.json`, and
@@ -310,10 +312,12 @@ against the release's signed `SHA256SUMS`, and says "A new version is available"
 `src/update_handoff.rs`), which waits for the window's process to exit, puts the new launcher in place (the
 binary, the `.app` bundle or the AppImage) and starts it. Closing the window with an update downloaded installs
 it the same way, so the next start is the new launcher. When the installer can't put it in place, the old
-launcher starts again and says why. A copy that can't replace itself says so at once and offers **Download
-again** (the website's install page): one in a read-only folder (the disk image, or the read-only copy macOS
-runs a downloaded app from until it is moved to Applications), or Windows' temporary copy of a program opened
-inside a `.zip`. `horizon-launcher update` replaces it at once. Development builds and
+launcher starts again and says why. Each process stages in its own folder, and the installer checks the signed
+SHA-256 again before anything goes in; when the launcher in place is already that version or newer, it changes
+nothing. Servers keep running through **Update**. A copy that can't replace itself says so at once and offers
+**Download again** (the website's install page): one in a read-only folder (the disk image, or the read-only copy
+macOS runs a downloaded app from until it is moved to Applications), or on Windows one running from the temporary
+folder, as a program opened inside a `.zip` does. `horizon-launcher update` replaces it at once. Development builds and
 `HORIZON_LAUNCHER_NO_SELF_UPDATE=1` never replace themselves.
 
 On Linux the release also comes as an AppImage, `horizon-launcher-linux-x86_64.AppImage`: one file

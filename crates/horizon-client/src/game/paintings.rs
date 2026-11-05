@@ -2,7 +2,7 @@
 //! variant choice (or the stack's `painting/variant`), `HangingEntity.survives`
 //! checks every 100 ticks, breaking by attack (`dropItem`), saving, and
 //! `PaintingRenderer` quads.
-use super::{Game, Hit};
+use super::{Game, Hit, entity_culling::default_range};
 use horizon_client::{entities::Painting, items::ItemStack, mesher::Vertex};
 use horizon_core::{
     geometry::{Aabb, Vec3},
@@ -185,8 +185,10 @@ impl Game<'_> {
         if &*stack.item != "minecraft:painting" {
             return false;
         }
+        // HangingEntityItem.mayPlace: never on a top or bottom face (FAIL).
         let Some(facing) = painting_facing(hit.face) else {
-            return false;
+            self.use_failed = true;
+            return true;
         };
         let pos = [
             hit.pos[0] + hit.face[0],
@@ -214,13 +216,14 @@ impl Game<'_> {
                 fitting.push(v);
             }
         }
+        // Nothing fits: CONSUME, which ItemStack.useOn still counts as a use.
         let Some(largest) = fitting.iter().map(|v| v.width * v.height).max() else {
-            return false;
+            self.award_stat("used", &stack.item, 1);
+            return true;
         };
         fitting.retain(|v| v.width * v.height >= largest);
-        let pick = self
-            .world
-            .random
+        // Util.getRandomSafe(variants, candidate.random): the painting's own random.
+        let pick = super::dispenser::entity_random()
             .next_int_bound(fitting.len() as i32)
             .unwrap_or(0) as usize;
         let v = &fitting[pick];
@@ -231,7 +234,8 @@ impl Game<'_> {
         if let Some(v) = self.painting_variants.of_stack(stack).cloned() {
             (candidate.variant, candidate.width, candidate.height) = (v.id, v.width, v.height);
             if !self.painting_survives(&candidate) {
-                return false;
+                self.award_stat("used", &stack.item, 1);
+                return true;
             }
         }
         if self.hanging_place_cancelled("minecraft:painting", pos) {
@@ -245,11 +249,16 @@ impl Game<'_> {
         ];
         self.audio
             .play("minecraft:entity.painting.place", Some(at), 1.0, 1.0);
+        // HangingEntityItem.useOn: ENTITY_PLACE at the painting, by the player, before it is
+        // added; ItemStack.useOn then counts the use.
+        let ctx = self.player_context(None);
+        self.post_game_event("minecraft:entity_place", at, ctx);
         self.paintings.push(candidate);
         self.world.modified.insert((pos[0] >> 4, pos[2] >> 4));
         if !self.creative {
             self.consume_held();
         }
+        self.award_stat("used", &stack.item, 1);
         // HangingEntityItem.useOn returns SUCCESS: the hand swings.
         self.swing_arm();
         true
@@ -351,13 +360,16 @@ impl Game<'_> {
             return;
         };
         for p in &self.paintings {
-            let entity_start = out.len();
             // EntityRenderer.shouldRender: the default range and its box,
             // measured from the box's centre (HangingEntity's position).
             let (lo, hi) = p.bounds();
             let (lo, hi) = (glam::DVec3::from(lo), glam::DVec3::from(hi));
-            let range = super::entity_culling::default_range(hi - lo, self.view_scale());
+            let range = default_range(hi - lo, self.view_scale());
             if !self.entity_in_view(camera, (lo + hi) / 2.0, range, lo, hi) {
+                continue;
+            }
+            let culling = self.entity_cull_decision(p, 1.0);
+            if culling.hides_entity() {
                 continue;
             }
             let Some(v) = self.painting_variants.get(&p.variant) else {
@@ -383,6 +395,7 @@ impl Game<'_> {
                 f64::from(p.height) / 2.0,
                 1.0 / 32.0,
             );
+            let entity_start = out.len();
             let light = self.world.light(p.pos[0], p.pos[1], p.pos[2]);
             let packed = (u32::from(light >> 4) * 16) | ((u32::from(light & 15) * 16) << 8);
             let mut quad =
@@ -486,7 +499,7 @@ impl Game<'_> {
                 strip,
                 0.6,
             );
-            self.cull_entity_vertices(out, entity_start);
+            self.finish_entity_occlusion(culling, p, out, entity_start);
         }
     }
 }

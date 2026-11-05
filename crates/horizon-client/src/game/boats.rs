@@ -5,6 +5,7 @@
 mod placement;
 
 use super::{Game, InteractTarget, entity::Entity, entity_culling::at, view_vector};
+use horizon_client::actions::Action;
 use horizon_client::entity_rules::EntityRules;
 use horizon_client::{
     blocks::Fluid,
@@ -1240,9 +1241,19 @@ impl Game<'_> {
                 ],
             );
         }
+        // BoatItem.use: ENTITY_PLACE at the hit (the boat's position), by the player.
+        let at = self
+            .boats
+            .last()
+            .map(|b| [b.position.x, b.position.y, b.position.z]);
+        if let Some(at) = at {
+            let ctx = self.player_context(None);
+            self.post_game_event("minecraft:entity_place", at, ctx);
+        }
         if !self.creative {
             self.consume_held();
         }
+        self.award_stat("used", &stack.item, 1);
         self.swing_arm();
         true
     }
@@ -1320,7 +1331,7 @@ impl Game<'_> {
         }) else {
             return false;
         };
-        let sneaking = self.keys.contains(&winit::keyboard::KeyCode::ShiftLeft);
+        let sneaking = self.keys.held(Action::Sneak);
         // Only a client's own pick is stopped by a block: the range check passed.
         if target.is_none() && !self.before_block(d) {
             return false;
@@ -1477,7 +1488,6 @@ impl Game<'_> {
             self.view_scale(),
         );
         for b in &self.boats {
-            let entity_start = out.len();
             // EntityRenderer.shouldRender.
             let (previous, position) = (at(b.previous), at(b.position));
             if !self.standing_entity_in_view(
@@ -1485,6 +1495,11 @@ impl Game<'_> {
             ) {
                 continue;
             }
+            let culling = self.entity_cull_decision(b, alpha);
+            if culling.hides_entity() {
+                continue;
+            }
+            let entity_start = out.len();
             let models = if b.chest {
                 &self.boat_models.chest_models
             } else {
@@ -1579,7 +1594,7 @@ impl Game<'_> {
                     out,
                 );
             }
-            self.cull_entity_vertices(out, entity_start);
+            self.finish_entity_occlusion(culling, b, out, entity_start);
         }
     }
 }

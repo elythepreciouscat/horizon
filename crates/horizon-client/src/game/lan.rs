@@ -489,7 +489,7 @@ fn mob_variant_meta(
 /// from the defaults the client constructs), with vanilla's entry indices:
 /// Entity 0..=7, LivingEntity 8..=14, Mob 15, then the subclasses.
 /// `defaults` gets the defaults of the entries that can go back to theirs.
-fn mob_meta(
+pub(super) fn mob_meta(
     m: &Mob,
     hub: &Hub,
     player_entity: Option<i32>,
@@ -497,7 +497,9 @@ fn mob_meta(
     meta: &mut Vec<(u8, i32, Value)>,
     defaults: &mut Vec<(u8, i32, Value)>,
 ) {
-    let kind = m.kind.id.as_str();
+    // The entries are the class's: a content mod's living type has its
+    // template's.
+    let kind = m.kind.class_id();
     // Entity.DATA_SHARED_FLAGS_ID: on fire 0x01, sprinting 0x08 (a dashing
     // cat or ocelot), swimming 0x10 (a drowned under water,
     // `Drowned.setSwimming`), invisible 0x20 (the effect's flag) and glowing
@@ -579,6 +581,13 @@ fn mob_meta(
     }
     let e = &m.extra;
     let id = |registry: &str, name: &str| hub.registry_id(registry, &format!("minecraft:{name}"));
+    // Pig.DATA_BOOST_TIME and Strider.DATA_BOOST_TIME (18, the first entry
+    // after AgeableMob's two). The total `boost()` stored in `counter2`.
+    // The default 0 is not registered: vanilla never writes it back, and the
+    // rider's client finishes the timer `onSynced` started.
+    if matches!(kind, "minecraft:pig" | "minecraft:strider") && e.counter2 > 0 {
+        meta.push((18, serializer::INT, Value::Int(e.counter2)));
+    }
     mob_variant_meta(m, hub, meta, defaults);
     mob_raider_meta(m, meta, defaults);
     match kind {
@@ -1527,7 +1536,9 @@ impl Game<'_> {
         guest: &mut horizon_client::lan::guest::Guest,
     ) {
         self.guest_attachments_into(guest);
-        if guest.placed {
+        // A player a proxy moved to another server (`player-release moved`) is saved
+        // there now, not here.
+        if guest.placed && !guest.released {
             let _ = self.finish_player_autosaves(true);
             if host.owner.as_ref().is_some_and(|o| o.uuid == guest.uuid) {
                 playerdata::save_owner(guest, &mut self.level, &self.world_root);
@@ -1677,7 +1688,7 @@ impl Game<'_> {
         host: &LanHost,
         guest: &horizon_client::lan::guest::Guest,
     ) {
-        if !guest.placed || self.adv.tree.list.is_empty() {
+        if !guest.placed || guest.released || self.adv.tree.list.is_empty() {
             return;
         }
         let Some(uuid) = self.records_uuid(host, guest.uuid) else {
@@ -2074,7 +2085,7 @@ impl Game<'_> {
                             let conn = guest.conn;
                             let at = host.hub.guests.len();
                             host.hub.guests.push(*guest);
-                            self.guest_close_all(&mut host, conn);
+                            self.guest_disconnected(&mut host, conn);
                             *guest = host.hub.guests.remove(at);
                         }
                         if let Err(e) = self.enter_level(Some(&mut host), back) {
@@ -2102,11 +2113,15 @@ impl Game<'_> {
                             "INFO",
                             &format!("{} lost connection: {}", guest.name, guest.left_reason),
                         );
-                        super::dedicated::log(
-                            "INFO",
-                            &format!("System chat: {} left the game", guest.name),
-                        );
-                    } else if self.player.is_some() && guest.placed {
+                        // A player moved to another server without `announce` was not
+                        // announced as leaving, so the line is not logged either.
+                        if !guest.quiet_leave {
+                            super::dedicated::log(
+                                "INFO",
+                                &format!("System chat: {} left the game", guest.name),
+                            );
+                        }
+                    } else if self.player.is_some() && guest.placed && !guest.quiet_leave {
                         // ServerGamePacketListenerImpl.removePlayerFromWorld.
                         let who = self.player_text(&guest.name, guest.uuid);
                         self.system_message(
@@ -2445,7 +2460,7 @@ impl Game<'_> {
         // this tick to their clients. Otherwise a newly broken block and its
         // drops remain absent from the snapshot until the following tick.
         if !paused {
-            self.tick_guests(&mut host);
+            horizon_client::spans::time("lan_guests", || self.tick_guests(&mut host));
             // The vehicles the guests just moved enter their portals now.
             let ridden: Vec<u32> = host.hub.guests.iter().filter_map(|g| g.vehicle).collect();
             self.find_ridden_vehicle_portals(&ridden);
@@ -2470,9 +2485,11 @@ impl Game<'_> {
                     .filter_map(|g| Some((g.vehicle?, g.entity_id)))
                     .collect();
                 self.lan_riding(&guests, &mut host.hub.riding);
-                self.lan_entities(&host.mob_players, &mut host.hub, &mut states, true, 0);
-                self.lan_hook_states(&host.play, &host.hub, &mut states);
-                self.lan_entity_uuids(&mut states);
+                horizon_client::spans::time("lan_entity_states", || {
+                    self.lan_entities(&host.mob_players, &mut host.hub, &mut states, true, 0);
+                    self.lan_hook_states(&host.play, &host.hub, &mut states);
+                    self.lan_entity_uuids(&mut states);
+                });
                 host.states_next_entity = Some(self.next_entity);
             } else {
                 host.states_next_entity = None;
@@ -2570,14 +2587,19 @@ impl Game<'_> {
                 if !pass.packets_drained {
                     events.extend(host.hub.drain_packets(&mut ctx));
                 }
-                events.extend(host.hub.tick_level(&mut ctx));
+                events.extend(horizon_client::spans::time("lan_tick_level", || {
+                    host.hub.tick_level(&mut ctx)
+                }));
                 if pass.last {
-                    host.hub.end_tick();
+                    horizon_client::spans::time("lan_end_tick", || host.hub.end_tick());
                 }
                 events
             };
             self.wake_woken_guests(&mut host);
-            let Some(back) = self.lan_process_events(host, events, entities, spawn) else {
+            let processed = horizon_client::spans::time("lan_process_events", || {
+                self.lan_process_events(host, events, entities, spawn)
+            });
+            let Some(back) = processed else {
                 return;
             };
             host = back;
@@ -2829,10 +2851,13 @@ impl Game<'_> {
         if event == 21 && self.options.execution_role.is_client() {
             self.start_guardian_sound(id as u32);
         }
-        // Event 53: a mob sliding down a honey block sheds honey particles
-        // (HoneyBlock.showSlideParticles), drawn by the client that runs the world.
-        if event == 53 && self.options.execution_role.is_client() {
-            self.honey_slide_particles(at);
+        // Events 53 and 54: honey crumbs while sliding, and the landing burst
+        // (`HoneyBlock.showSlideParticles` / `showJumpParticles`), drawn by the
+        // client that runs the world.
+        if self.options.execution_role.is_client()
+            && horizon_client::landing::honey_particle_count(event).is_some()
+        {
+            self.honey_entity_particles(at, event);
         }
         // Event 2: a mob's spear hit felt; the same window hears its own mob's hit.
         if event == 2 && self.options.execution_role.is_client() {
@@ -3634,14 +3659,64 @@ mod tests {
     /// the raider celebrates.
     #[test]
     fn a_celebrating_raider_is_sent_by_mob_meta() {
-        use horizon_client::lan::{Lan, NetConfig, chunks::ChunkEncoder, data, hub};
         let Some(mut pillager) = mob_of("minecraft:pillager") else {
             return;
         };
+        let hub = meta_hub("RaiderMetaTest");
+        let meta_of = |m: &Mob| {
+            let (mut meta, mut defaults) = (Vec::new(), Vec::new());
+            super::mob_meta(m, &hub, None, 0, &mut meta, &mut defaults);
+            (meta, defaults)
+        };
+
+        let (meta, defaults) = meta_of(&pillager);
+        assert!(defaults.contains(&(16, serializer::BOOLEAN, Value::Bool(false))));
+        assert!(meta.iter().all(|e| e.0 != 16), "{meta:?}");
+        horizon_client::mobs::raider::state_mut(&mut pillager).celebrating = true;
+        let (meta, _) = meta_of(&pillager);
+        assert!(
+            meta.contains(&(16, serializer::BOOLEAN, Value::Bool(true))),
+            "{meta:?}"
+        );
+    }
+
+    /// A content mod's living type sends the entity data of its template's
+    /// class (`Zombie.DATA_BABY_ID`, the villager's unhappy counter), entry
+    /// for entry what its template sends.
+    #[test]
+    fn a_mod_living_type_sends_its_templates_entity_data() {
+        let types = super::super::mods::living_mod_types();
+        let hub = meta_hub("ModMobMetaTest");
+        let meta_of = |id: &str| {
+            let at = horizon_core::geometry::Vec3::new(0.5, 64.0, 0.5);
+            let mut m = Mob::new(1, types[id].clone(), at, 0.0);
+            m.extra.age = -24000;
+            // The same health: the ghoul's own maximum is 40, the zombie's 20.
+            m.health = 10.0;
+            let (mut meta, mut defaults) = (Vec::new(), Vec::new());
+            super::mob_meta(&m, &hub, None, 0, &mut meta, &mut defaults);
+            (meta, defaults)
+        };
+        for (template, id) in [
+            ("minecraft:zombie", "ruby:ghoul"),
+            ("minecraft:villager", "ruby:settler"),
+            ("minecraft:wandering_trader", "ruby:merchant"),
+        ] {
+            assert_eq!(
+                meta_of(id),
+                meta_of(template),
+                "{id} sends what {template} sends"
+            );
+        }
+    }
+
+    /// A hub with no players and empty registries, for `mob_meta`.
+    fn meta_hub(name: &str) -> horizon_client::lan::hub::Hub {
+        use horizon_client::lan::{Lan, NetConfig, chunks::ChunkEncoder, data, hub};
         let sync = std::sync::Arc::new(data::SyncData::empty());
         let config = NetConfig {
             announce: false,
-            ..NetConfig::lan(0, "RaiderMetaTest".into(), 2)
+            ..NetConfig::loopback(0, name.into(), 2)
         };
         let lan = Lan::start_with(sync.clone(), config).unwrap();
         let encoder = ChunkEncoder::new(
@@ -3664,22 +3739,7 @@ mod tests {
             integrated: false,
             levels: Default::default(),
         };
-        let hub = hub::Hub::new(lan, sync, encoder, hub_config);
-        let meta_of = |m: &Mob| {
-            let (mut meta, mut defaults) = (Vec::new(), Vec::new());
-            super::mob_meta(m, &hub, None, 0, &mut meta, &mut defaults);
-            (meta, defaults)
-        };
-
-        let (meta, defaults) = meta_of(&pillager);
-        assert!(defaults.contains(&(16, serializer::BOOLEAN, Value::Bool(false))));
-        assert!(meta.iter().all(|e| e.0 != 16), "{meta:?}");
-        horizon_client::mobs::raider::state_mut(&mut pillager).celebrating = true;
-        let (meta, _) = meta_of(&pillager);
-        assert!(
-            meta.contains(&(16, serializer::BOOLEAN, Value::Bool(true))),
-            "{meta:?}"
-        );
+        hub::Hub::new(lan, sync, encoder, hub_config)
     }
 
     /// `LivingEntity.startUsingItem` sets flag 1 for the use and flag 2 for

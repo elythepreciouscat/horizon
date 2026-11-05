@@ -82,6 +82,11 @@ impl Game<'_> {
                 }
             } else if key == KeyCode::Escape {
                 self.close_gamemode_switcher(false);
+            } else if name == self.settings.keys.get("key.debug.debugOptions") {
+                // The debug options screen interrupts the switcher too
+                // (`canInterruptScreen`): it closes, then F6 opens over the game.
+                self.close_gamemode_switcher(false);
+                self.toggle_debug_options();
             } else if matches!(key, KeyCode::F2 | KeyCode::F11) {
                 return false;
             }
@@ -797,7 +802,7 @@ impl Game<'_> {
             "client"
         };
         if self.entity_targeted()
-            && let Some((index, _)) = self.mob_hit()
+            && let Some((index, _, _)) = self.mob_hit()
         {
             let (kind, position, id) = {
                 let m = &self.mobs[index];

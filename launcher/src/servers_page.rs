@@ -64,10 +64,12 @@ pub(super) enum Field {
     DeleteServer,
     /// Settings' accent as hex (`themes_page.rs`).
     AccentHex,
+    /// The Shop's gift recipient (`wardrobe_page/shop/basket.rs`).
+    ShopGift,
 }
 
 impl Field {
-    const ALL: [Field; 24] = [
+    const ALL: [Field; 25] = [
         Field::Name,
         Field::Seed,
         Field::Players,
@@ -92,6 +94,7 @@ impl Field {
         Field::OfflineName,
         Field::DeleteServer,
         Field::AccentHex,
+        Field::ShopGift,
     ];
 }
 
@@ -390,6 +393,13 @@ pub(super) fn stop_on_quit() {
             let _ = api.call("POST", "/api/v1/stop", None);
         }
     }
+}
+
+/// Update closes the window to open the new launcher at once: a server is its own process and the
+/// new window finds it running, so an update doesn't end anyone's game. It stays up when that new
+/// window closes too, until it is stopped on the Servers page.
+pub(super) fn keep_running_through_update() {
+    STARTED_HERE.lock().unwrap().clear();
 }
 
 /// The player's own name, to let them in on a friends-only server: the Microsoft account that plays,
@@ -1203,6 +1213,7 @@ impl Launcher {
             }
             Field::MemoryLimit => self.memory_enter(),
             Field::OfflineName => self.offline_name_enter(),
+            Field::ShopGift => self.shop.find_soon = true,
             Field::ServerName | Field::ServerAddress => self.add_server(),
         }
     }

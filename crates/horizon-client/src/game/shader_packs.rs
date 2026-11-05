@@ -163,6 +163,12 @@ impl Game<'_> {
             self.streaming.shader_pack_lighting = pack_lighting;
             self.all_sections_changed();
         }
+        // Any `shaders/` pack (its `oldLighting` too) draws fluid tops split as Iris does.
+        let shader_pack = self.pack_ids.is_some();
+        if self.streaming.shader_pack != shader_pack {
+            self.streaming.shader_pack = shader_pack;
+            self.all_sections_changed();
+        }
         let separate_ao = self.pack_ids.as_ref().is_some_and(|ids| ids.separate_ao);
         if self.streaming.separate_ao != separate_ao {
             self.streaming.separate_ao = separate_ao;
@@ -225,6 +231,16 @@ impl Game<'_> {
                             .get("separateAo")
                             .is_some_and(|v| v.trim() == "true");
                         renderer.set_separate_ao(separate_ao);
+                        // Lava's faces draw with the solid terrain's program.
+                        renderer.set_pack_lava_layers(
+                            ["lava_still", "lava_flow"]
+                                .iter()
+                                .filter_map(|f| {
+                                    let name = format!("minecraft:block/{f}");
+                                    self.pack.render.sprite_layers.get(&name).map(|&l| l as u16)
+                                })
+                                .collect(),
+                        );
                         let folder = dimension_folder_named(&pack, self.dim.id(), dimension);
                         let inputs = renderer.pack_inputs();
                         let mut post = load_post(&pack, &folder, &properties, &macros, &inputs);
@@ -381,10 +397,7 @@ impl Game<'_> {
             has_skylight: self.world.shape.sky_light,
             has_ceiling: self.world.shape.has_ceiling,
             elytra_flying: self.player.as_ref().is_some_and(|p| p.fall_flying),
-            cloud_height: horizon_client::gfx::pack_uniforms::cloud_height(
-                sky.cloud_color[3],
-                sky.cloud_height,
-            ),
+            cloud_height: horizon_client::gfx::pack_uniforms::cloud_height(sky),
             // Vanilla's drift in float, times its 0.030000001F blocks a tick.
             cloud_time: horizon_client::clouds::drift(
                 self.world.game_time,
@@ -398,6 +411,7 @@ impl Game<'_> {
             end_flash_direction,
             ambient_light: dimension.map_or(0.0, |d| d.ambient_light),
             mood: self.ambience.moodiness,
+            still_ticks: self.clock.still().then(|| self.visual_ticks()),
         }
     }
 

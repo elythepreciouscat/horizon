@@ -70,6 +70,8 @@ getrandom = "0.3"
 # Players' heads on the Servers page, from the default skins in the player's own game files (already
 # in the lockfile through gpui).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# Screenshots read a row at a time and shrunk as they come (`pictures`): the version `image` uses.
+png = "0.18"
 
 # Native builds at low priority (rust_toolchain::low_priority); already in the lockfile.
 [target.'cfg(unix)'.dependencies]
@@ -89,9 +91,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAcce
 raw-window-handle = "0.6"
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
-# Java's heap slider reads the computer's memory; the uninstaller hides its running copy.
-# Already in the lockfile.
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+# Java's heap slider reads the computer's memory; the uninstaller hides its running copy; an
+# abandoned launcher update is one whose process has gone. Already in the lockfile.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 # Shortcuts written by the shell itself (shortcut::write_windows_link): the hand-laid Shell Link has
 # no target ID list, so Explorer shows an empty target and starts nothing.
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_UI_Shell"] }

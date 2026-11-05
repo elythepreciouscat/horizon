@@ -723,7 +723,7 @@ impl SortState {
     }
 
     /// Large tiles cannot use the section viewpoint shortcut: the camera may
-    /// cross a quad's plane while remaining on the same side of the first 163.
+    /// cross a quad's plane while remaining on the same side of the first 16^3.
     pub fn update_lod<'a>(
         &mut self,
         camera: [f64; 3],

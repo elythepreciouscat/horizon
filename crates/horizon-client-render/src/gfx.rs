@@ -5392,6 +5392,7 @@ impl Renderer {
                     .iter()
                     .map(|q| translucency::quad_center(q[0].pos, q[2].pos))
                     .collect(),
+                translucency::classify(&mesh.translucent),
             ),
             sorted_indices,
             flat_id,
@@ -12024,7 +12025,10 @@ mod tests {
             packed: false,
             sides: crate::mesher::Sides::unsorted(solid),
             translucent,
-            sort: super::translucency::SortState::new(Vec::new()),
+            sort: super::translucency::SortState::new(
+                Vec::new(),
+                super::translucency::Order::Dynamic,
+            ),
             sorted_indices: None,
             flat_id: None,
             gpu_id: None,

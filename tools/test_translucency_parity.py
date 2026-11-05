@@ -14,6 +14,20 @@ except ImportError:
 
 def cases():
     rng = random.Random(563)
+    partitioned_quads = []
+    for index in range(65):
+        x = index * 2.0
+        if index % 2 == 0:
+            partitioned_quads.append([
+                [x, -0.5, -0.5], [x, 0.5, -0.5],
+                [x, 0.5, 0.5], [x, -0.5, 0.5]])
+        else:
+            partitioned_quads.append([
+                [x, 0.0, -0.5], [x + 0.5, 0.0, -0.5],
+                [x + 0.5, 0.0, 0.5], [x, 0.0, 0.5]])
+    yield {'origin': [0, 0, 0], 'quads': partitioned_quads,
+           'cameras': [[-10, 0, 0], [200, 0, 0]], 'check_partition_tree': True}
+
     # Equal distances and a skewed quad detect unstable ties and averaging all four corners.
     yield {'origin': [0, 0, 0], 'quads': [
         [[-1, 0, 0]] * 4, [[1, 0, 0]] * 4,
@@ -39,7 +53,8 @@ def main():
     classes = build / 'classes'
     classes.mkdir(parents=True, exist_ok=True)
     inputs = build / 'inputs.jsonl'
-    inputs.write_text(''.join(json.dumps(c) + '\n' for c in cases()), encoding='utf-8')
+    fixtures = list(cases())
+    inputs.write_text(''.join(json.dumps(c) + '\n' for c in fixtures), encoding='utf-8')
     dependencies = os.pathsep.join(map(str, [jars['client'], *baking.client_libraries()]))
 
     def run(command, name):
@@ -57,7 +72,14 @@ def main():
     actual = [json.loads(line) for line in rust.read_text().splitlines()]
     assert len(expected) == len(actual), 'case count differs'
     for i, (a, b) in enumerate(zip(expected, actual)):
+        partition_tree_indices = b.pop('partition_tree_indices', None)
         assert a == b, f'sorting mismatch in case {i}; inspect {build}'
+        if fixtures[i].get('check_partition_tree'):
+            vanilla_orders = [frame['indices'] for frame in a['frames']]
+            assert partition_tree_indices == vanilla_orders, (
+                f'partition-tree sort differs from vanilla in case {i}; inspect {build}')
+        else:
+            assert partition_tree_indices is None, f'unexpected partition-tree result in case {i}'
     frames = sum(len(c['frames']) for c in expected)
     print(f'translucency parity ok: {len(expected)} cases, {frames} camera views; centroids, indices and cache decisions match exactly')
 
